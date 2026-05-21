@@ -54,6 +54,7 @@ const SECURITY_HEADERS = [
 ] as const;
 
 const nextConfig: NextConfig = {
+  output: 'standalone',
   /**
    * Cache-Control policy.
    *
@@ -93,15 +94,21 @@ const nextConfig: NextConfig = {
    */
   async headers() {
     return [
-      {
-        source: "/_next/static/:path*",
-        headers: [
-          {
-            key: "Cache-Control",
-            value: "public, max-age=31536000, immutable",
-          },
-        ],
-      },
+      // Only override static-asset caching in production — in dev this
+      // header breaks HMR (stale chunks won't refresh after a save).
+      ...(process.env.NODE_ENV === "production"
+        ? [
+            {
+              source: "/_next/static/:path*",
+              headers: [
+                {
+                  key: "Cache-Control",
+                  value: "public, max-age=31536000, immutable",
+                },
+              ],
+            },
+          ]
+        : []),
       {
         source: "/api/:path*",
         headers: [{ key: "Cache-Control", value: "no-store" }],
