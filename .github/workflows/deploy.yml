@@ -56,6 +56,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy docker-compose.yml to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: docker-compose.yml
+          target: /var/www/wacrm
+
       - name: SSH deploy
         uses: appleboy/ssh-action@v1
         with:
@@ -63,6 +74,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            mkdir -p /var/www/wacrm
             cd /var/www/wacrm
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker compose pull
