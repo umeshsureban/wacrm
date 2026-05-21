@@ -23,7 +23,11 @@ export async function proxy(request: NextRequest) {
     }
   )
 
-  const { data: { user } } = await supabase.auth.getUser()
+  // getSession reads the cookie locally — no Supabase network round-trip.
+  // getUser() (network-verified) is used in Server Components and API routes
+  // that actually fetch user data, so route-guarding here doesn't need it.
+  const { data: { session } } = await supabase.auth.getSession()
+  const user = session?.user ?? null
 
   // Auth pages - redirect to dashboard if already logged in
   if (user && (
