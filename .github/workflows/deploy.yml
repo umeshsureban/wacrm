@@ -13,6 +13,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-push:
@@ -24,6 +25,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -63,6 +66,8 @@ jobs:
     needs: build-and-push
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Copy docker-compose.yml to VPS
         uses: appleboy/scp-action@v0.1.7
@@ -92,11 +97,14 @@ jobs:
               echo "  attempt $i/12: $STATUS"
               if [ "$STATUS" = "healthy" ]; then exit 0; fi
               if [ "$STATUS" = "unhealthy" ]; then
-                echo "Container is unhealthy — rolling back"
+                echo "Container is unhealthy — dumping logs:"
+                docker logs wacrm-wacrm-1 --tail 80 2>&1
+                echo "Rolling back"
                 docker compose down
                 exit 1
               fi
               sleep 10
             done
-            echo "Timed out waiting for healthy status"
+            echo "Timed out waiting for healthy status — dumping logs:"
+            docker logs wacrm-wacrm-1 --tail 80 2>&1
             exit 1

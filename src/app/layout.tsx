@@ -9,11 +9,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: {
-    default: "wacrm",
-    template: "%s — wacrm",
-  },
-  description: "Self-hostable CRM template for WhatsApp.",
+  title: "MATU on WhatsApp",
+  description: "MATU on WhatsApp — self-hostable WhatsApp business CRM.",
   robots: {
     index: false,
     follow: false,

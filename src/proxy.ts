@@ -30,6 +30,7 @@ export async function proxy(request: NextRequest) {
   const user = session?.user ?? null
 
   // Auth pages - redirect to dashboard if already logged in
+  // Note: /reset-password is intentionally excluded — the recovery session must stay active there
   if (user && (
     request.nextUrl.pathname === '/login' ||
     request.nextUrl.pathname === '/signup' ||

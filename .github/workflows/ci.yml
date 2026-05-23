@@ -25,6 +25,7 @@ jobs:
     # empty placeholder works as long as it stays consistent with
     # vitest.config.ts.
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       NEXT_PUBLIC_SUPABASE_URL: https://ci.example.supabase.co
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-dummy-anon-key
       ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
