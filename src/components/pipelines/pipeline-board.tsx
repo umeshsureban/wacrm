@@ -18,6 +18,7 @@ import type { Deal, PipelineStage } from "@/types";
 import { DealCard } from "./deal-card";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
+import { groupByCurrency, formatGroupedCurrency } from "@/lib/format-currency";
 
 interface PipelineBoardProps {
   stages: PipelineStage[];
@@ -25,15 +26,6 @@ interface PipelineBoardProps {
   onDealMoved: (dealId: string, newStageId: string) => void;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
 }
 
 export function PipelineBoard({
@@ -109,16 +101,11 @@ export function PipelineBoard({
       <div className="pipeline-scroll flex snap-x snap-mandatory gap-3 overflow-x-auto pb-4 lg:snap-none">
         {sortedStages.map((stage) => {
           const stageDeals = dealsByStage.get(stage.id) ?? [];
-          const totalValue = stageDeals.reduce(
-            (s, d) => s + Number(d.value || 0),
-            0,
-          );
           return (
             <StageColumn
               key={stage.id}
               stage={stage}
               deals={stageDeals}
-              totalValue={totalValue}
               onAddDeal={onAddDeal}
               onEditDeal={onEditDeal}
             />
@@ -167,17 +154,16 @@ export function PipelineBoard({
 function StageColumn({
   stage,
   deals,
-  totalValue,
   onAddDeal,
   onEditDeal,
 }: {
   stage: PipelineStage;
   deals: Deal[];
-  totalValue: number;
   onAddDeal: (stageId: string) => void;
   onEditDeal: (deal: Deal) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.id });
+  const stageTotalLabel = formatGroupedCurrency(groupByCurrency(deals));
 
   return (
     // On mobile each column is `w-[85vw]` (with a reasonable min/max)
@@ -200,7 +186,7 @@ function StageColumn({
           {deals.length}
         </span>
       </div>
-      <p className="text-xs text-slate-400">{formatCurrency(totalValue)}</p>
+      <p className="text-xs text-slate-400">{stageTotalLabel}</p>
 
       <div
         ref={setNodeRef}

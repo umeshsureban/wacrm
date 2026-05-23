@@ -17,19 +17,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { formatGroupedCurrency } from "@/lib/format-currency";
 
 interface PipelineAnalyticsProps {
   stages: PipelineStage[];
   deals: Deal[];
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
 }
 
 /**
@@ -63,16 +55,33 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
     const openDeals = active.filter((d) => d.status !== "won");
 
     const totalCount = active.length;
-    const totalValue = active.reduce((sum, d) => sum + Number(d.value || 0), 0);
-    const avgValue = totalCount > 0 ? totalValue / totalCount : 0;
+
+    // Per-currency totals
+    const totalByCur = new Map<string, number>();
+    const countByCur = new Map<string, number>();
+    for (const d of active) {
+      const cur = d.currency || "USD";
+      totalByCur.set(cur, (totalByCur.get(cur) ?? 0) + Number(d.value || 0));
+      countByCur.set(cur, (countByCur.get(cur) ?? 0) + 1);
+    }
+
+    const avgByCur = new Map<string, number>();
+    for (const [cur, total] of totalByCur) {
+      avgByCur.set(cur, total / (countByCur.get(cur) ?? 1));
+    }
 
     const stageById = new Map(sortedStages.map((s) => [s.id, s]));
-    const weightedValue = openDeals.reduce((sum, d) => {
+    const weightedByCur = new Map<string, number>();
+    for (const d of openDeals) {
       const stage = stageById.get(d.stage_id);
-      if (!stage) return sum;
+      if (!stage) continue;
       const prob = computeStageProbability(stage, sortedStages);
-      return sum + Number(d.value || 0) * prob;
-    }, 0);
+      const cur = d.currency || "USD";
+      weightedByCur.set(
+        cur,
+        (weightedByCur.get(cur) ?? 0) + Number(d.value || 0) * prob,
+      );
+    }
 
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -89,9 +98,9 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
 
     return {
       totalCount,
-      totalValue,
-      avgValue,
-      weightedValue,
+      totalValueLabel: formatGroupedCurrency(totalByCur),
+      avgValueLabel: formatGroupedCurrency(avgByCur),
+      weightedValueLabel: formatGroupedCurrency(weightedByCur),
       wonThisMonth,
       lostThisMonth,
     };
@@ -109,19 +118,19 @@ export function PipelineAnalytics({ stages, deals }: PipelineAnalyticsProps) {
         <Metric
           icon={<DollarSign className="h-4 w-4 text-violet-400" />}
           label="Pipeline Value"
-          value={formatCurrency(stats.totalValue)}
-          tooltip="Sum of the dollar values of all deals in this pipeline, excluding deals marked as Lost."
+          value={stats.totalValueLabel}
+          tooltip="Sum of deal values in this pipeline, excluding deals marked as Lost."
         />
         <Metric
           icon={<Target className="h-4 w-4 text-blue-400" />}
           label="Avg Deal Size"
-          value={formatCurrency(stats.avgValue)}
+          value={stats.avgValueLabel}
           tooltip="Pipeline Value divided by Total Deals — the average value of a single non-lost deal."
         />
         <Metric
           icon={<TrendingUp className="h-4 w-4 text-purple-400" />}
           label="Weighted Value"
-          value={formatCurrency(stats.weightedValue)}
+          value={stats.weightedValueLabel}
           tooltip="Expected revenue: each open deal's value × its stage probability. First stage ≈ 10%, stages progress up to 90%, Won = 100%. Lost deals are excluded."
         />
         <Metric

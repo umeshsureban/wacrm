@@ -10,7 +10,7 @@ export interface MetricDelta {
 export interface MetricsBundle {
   activeConversations: MetricDelta
   newContactsToday: MetricDelta
-  openDealsValue: number
+  openDealsByCurrency: Record<string, number>
   openDealsCount: number
   messagesSentToday: MetricDelta
 }
@@ -27,11 +27,13 @@ export interface PipelineStageSlice {
   color: string
   dealCount: number
   totalValue: number
+  valueByCurrency: Record<string, number>
 }
 
 export interface PipelineDonutData {
   stages: PipelineStageSlice[]
   totalValue: number
+  totalByCurrency: Record<string, number>
 }
 
 export interface ResponseTimeBucket {

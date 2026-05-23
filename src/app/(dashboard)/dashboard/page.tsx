@@ -16,6 +16,7 @@ import {
   loadPipelineDonut,
   loadResponseTime,
 } from '@/lib/dashboard/queries'
+import { formatGroupedCurrency } from '@/lib/format-currency'
 import type {
   ActivityItem,
   ConversationsSeriesPoint,
@@ -155,7 +156,7 @@ export default function DashboardPage() {
             />
             <MetricCard
               title="Open Deals Value"
-              value={formatCurrency(metrics.openDealsValue)}
+              value={formatGroupedCurrency(new Map(Object.entries(metrics.openDealsByCurrency)))}
               icon={DollarSign}
               subtitle={`${metrics.openDealsCount} open deal${metrics.openDealsCount === 1 ? '' : 's'}`}
             />
@@ -210,15 +211,6 @@ export default function DashboardPage() {
 }
 
 // ------------------------------------------------------------
-
-function formatCurrency(v: number): string {
-  return new Intl.NumberFormat(undefined, {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(v)
-}
 
 function deltaLabel(delta: number, suffix: string): string {
   if (delta === 0) return `No change ${suffix}`

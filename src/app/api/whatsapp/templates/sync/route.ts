@@ -33,10 +33,19 @@ import { decrypt } from '@/lib/whatsapp/encryption'
 const META_API_VERSION = 'v21.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
 
+interface MetaTemplateButton {
+  type: string
+  text: string
+  url?: string
+  phone_number?: string
+  flow_id?: number
+}
+
 interface MetaTemplateComponent {
   type: string
   text?: string
   format?: string
+  buttons?: MetaTemplateButton[]
 }
 
 interface MetaTemplate {
@@ -171,6 +180,7 @@ export async function POST() {
       const body = (t.components ?? []).find((c) => c.type === 'BODY')
       const header = (t.components ?? []).find((c) => c.type === 'HEADER')
       const footer = (t.components ?? []).find((c) => c.type === 'FOOTER')
+      const buttonsComponent = (t.components ?? []).find((c) => c.type === 'BUTTONS')
 
       const row = {
         user_id: user.id,
@@ -181,6 +191,7 @@ export async function POST() {
         header_content: header?.text ?? null,
         body_text: body?.text ?? '',
         footer_text: footer?.text ?? null,
+        buttons: buttonsComponent?.buttons ?? null,
         status: normalizeStatus(t.status),
         updated_at: new Date().toISOString(),
       }

@@ -61,7 +61,7 @@ export async function loadMetrics(db: DB): Promise<MetricsBundle> {
       .select('id', { count: 'exact', head: true })
       .gte('created_at', yesterdayStart)
       .lt('created_at', todayStart),
-    db.from('deals').select('value, status').eq('status', 'open'),
+    db.from('deals').select('value, currency, status').eq('status', 'open'),
     db
       .from('messages')
       .select('id', { count: 'exact', head: true })
@@ -75,8 +75,12 @@ export async function loadMetrics(db: DB): Promise<MetricsBundle> {
       .lt('created_at', todayStart),
   ])
 
-  const openDealsRows = (openDeals.data ?? []) as { value: number | null }[]
-  const openDealsValue = openDealsRows.reduce((sum, d) => sum + (d.value ?? 0), 0)
+  const openDealsRows = (openDeals.data ?? []) as { value: number | null; currency?: string | null }[]
+  const openDealsByCurrency: Record<string, number> = {}
+  for (const d of openDealsRows) {
+    const cur = d.currency || 'USD'
+    openDealsByCurrency[cur] = (openDealsByCurrency[cur] ?? 0) + (d.value ?? 0)
+  }
 
   return {
     activeConversations: {
@@ -90,7 +94,7 @@ export async function loadMetrics(db: DB): Promise<MetricsBundle> {
       current: newContactsToday.count ?? 0,
       previous: newContactsYesterday.count ?? 0,
     },
-    openDealsValue,
+    openDealsByCurrency,
     openDealsCount: openDealsRows.length,
     messagesSentToday: {
       current: messagesToday.count ?? 0,
@@ -133,18 +137,20 @@ export async function loadConversationsSeries(
 export async function loadPipelineDonut(db: DB): Promise<PipelineDonutData> {
   const [stagesRes, dealsRes] = await Promise.all([
     db.from('pipeline_stages').select('id, name, color, pipeline_id, position').order('position'),
-    db.from('deals').select('stage_id, value, status').eq('status', 'open'),
+    db.from('deals').select('stage_id, value, currency, status').eq('status', 'open'),
   ])
 
   const stages =
     (stagesRes.data ?? []) as { id: string; name: string; color: string }[]
-  const deals = (dealsRes.data ?? []) as { stage_id: string; value: number | null }[]
+  const deals = (dealsRes.data ?? []) as { stage_id: string; value: number | null; currency?: string | null }[]
 
-  const byStage = new Map<string, { count: number; total: number }>()
+  const byStage = new Map<string, { count: number; total: number; byCurrency: Record<string, number> }>()
   for (const d of deals) {
-    const row = byStage.get(d.stage_id) ?? { count: 0, total: 0 }
+    const row = byStage.get(d.stage_id) ?? { count: 0, total: 0, byCurrency: {} }
     row.count += 1
     row.total += d.value ?? 0
+    const cur = d.currency || 'USD'
+    row.byCurrency[cur] = (row.byCurrency[cur] ?? 0) + (d.value ?? 0)
     byStage.set(d.stage_id, row)
   }
 
@@ -155,15 +161,24 @@ export async function loadPipelineDonut(db: DB): Promise<PipelineDonutData> {
       color: s.color || '#64748b',
       dealCount: byStage.get(s.id)?.count ?? 0,
       totalValue: byStage.get(s.id)?.total ?? 0,
+      valueByCurrency: byStage.get(s.id)?.byCurrency ?? {},
     }))
     // Hide empty stages from the ring (but we'd still show them in the
     // legend if the user wanted a full breakdown — trimming keeps the
     // visual clean for the common case).
     .filter((s) => s.totalValue > 0 || s.dealCount > 0)
 
+  const totalByCurrency: Record<string, number> = {}
+  for (const s of slices) {
+    for (const [cur, val] of Object.entries(s.valueByCurrency)) {
+      totalByCurrency[cur] = (totalByCurrency[cur] ?? 0) + val
+    }
+  }
+
   return {
     stages: slices,
     totalValue: slices.reduce((sum, s) => sum + s.totalValue, 0),
+    totalByCurrency,
   }
 }
 
