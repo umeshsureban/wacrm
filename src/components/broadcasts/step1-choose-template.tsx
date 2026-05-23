@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { MessageTemplate } from '@/types';
 import { Button } from '@/components/ui/button';
-import { Loader2, FileText, ArrowRight } from 'lucide-react';
+import { Loader2, FileText, ArrowRight, RefreshCw } from 'lucide-react';
 
 const categoryColors: Record<string, string> = {
   Marketing: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
@@ -22,28 +22,46 @@ interface Step1Props {
 export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack }: Step1Props) {
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function fetchTemplates() {
-      try {
-        const supabase = createClient();
-        const { data, error: fetchError } = await supabase
-          .from('message_templates')
-          .select('*')
-          .order('created_at', { ascending: false });
+  async function fetchTemplates() {
+    try {
+      const supabase = createClient();
+      const { data, error: fetchError } = await supabase
+        .from('message_templates')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-        if (fetchError) throw fetchError;
-        setTemplates(data ?? []);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load templates');
-      } finally {
-        setLoading(false);
-      }
+      if (fetchError) throw fetchError;
+      setTemplates(data ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load templates');
+    } finally {
+      setLoading(false);
     }
+  }
 
-    fetchTemplates();
-  }, []);
+  useEffect(() => { fetchTemplates(); }, []);
+
+  async function handleSync() {
+    setSyncing(true);
+    setSyncMsg(null);
+    setError(null);
+    try {
+      const res = await fetch('/api/whatsapp/templates/sync', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Sync failed');
+      setSyncMsg(`Synced ${data.total} templates from Meta (${data.inserted} new, ${data.updated} updated).`);
+      // Reload the local list to reflect the fresh data.
+      await fetchTemplates();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -63,12 +81,34 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold text-white">Choose a Template</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Select an approved message template for your broadcast.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Choose a Template</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Select an approved message template for your broadcast.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSync}
+          disabled={syncing}
+          className="shrink-0 border-slate-700 text-slate-300 hover:bg-slate-800"
+        >
+          {syncing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}
+          {syncing ? 'Syncing…' : 'Sync from Meta'}
+        </Button>
       </div>
+
+      {syncMsg && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+          {syncMsg}
+        </div>
+      )}
 
       {templates.length === 0 ? (
         <div className="flex h-48 flex-col items-center justify-center rounded-xl border border-slate-800 bg-slate-900/50">

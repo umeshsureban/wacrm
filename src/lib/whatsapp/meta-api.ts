@@ -119,7 +119,12 @@ export interface SendTemplateMessageArgs {
   to: string
   templateName: string
   language?: string
+  /** Body component parameters. Also accepted as `params` for backward compatibility. */
+  bodyParams?: string[]
+  /** @deprecated Use bodyParams instead. Kept so existing callers don't break. */
   params?: string[]
+  /** Text header component parameters. Required when the template's header type is TEXT and contains {{N}} variables. */
+  headerParams?: string[]
   /** Meta's message_id of the message being replied to. */
   contextMessageId?: string
 }
@@ -137,7 +142,9 @@ export async function sendTemplateMessage(
     to,
     templateName,
     language = 'en_US',
+    bodyParams,
     params,
+    headerParams,
     contextMessageId,
   } = args
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
@@ -147,13 +154,24 @@ export async function sendTemplateMessage(
     language: { code: language },
   }
 
-  if (params && params.length > 0) {
-    template.components = [
-      {
-        type: 'body',
-        parameters: params.map((p) => ({ type: 'text', text: String(p) })),
-      },
-    ]
+  const resolvedBody = bodyParams ?? params ?? []
+  const resolvedHeader = headerParams ?? []
+  const components: Record<string, unknown>[] = []
+
+  if (resolvedHeader.length > 0) {
+    components.push({
+      type: 'header',
+      parameters: resolvedHeader.map((p) => ({ type: 'text', text: String(p) })),
+    })
+  }
+  if (resolvedBody.length > 0) {
+    components.push({
+      type: 'body',
+      parameters: resolvedBody.map((p) => ({ type: 'text', text: String(p) })),
+    })
+  }
+  if (components.length > 0) {
+    template.components = components
   }
 
   const body: Record<string, unknown> = {

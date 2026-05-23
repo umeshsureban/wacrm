@@ -47,6 +47,111 @@ const SAMPLE_CONTACT: Contact = {
   updated_at: new Date().toISOString(),
 };
 
+interface VariableRowProps {
+  varKey: string;
+  placeholder: string;
+  mapping: VariableMapping;
+  customFields: CustomField[];
+  loadingFields: boolean;
+  onUpdate: (key: string, patch: Partial<VariableMapping>) => void;
+}
+
+function VariableRow({
+  varKey,
+  placeholder,
+  mapping,
+  customFields,
+  loadingFields,
+  onUpdate,
+}: VariableRowProps) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="inline-flex items-center rounded-md bg-violet-500/10 px-2 py-0.5 text-xs font-mono font-medium text-violet-400">
+          {placeholder}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-slate-400">
+            Mapping Type
+          </label>
+          <Select
+            value={mapping.type}
+            onValueChange={(val) =>
+              onUpdate(varKey, { type: val as VariableType, value: '' })
+            }
+          >
+            <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="border-slate-700 bg-slate-800">
+              <SelectItem value="static">Static Value</SelectItem>
+              <SelectItem value="field">Contact Field</SelectItem>
+              <SelectItem value="custom_field">Custom Field</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-slate-400">
+            {mapping.type === 'static' ? 'Value' : 'Field'}
+          </label>
+          {mapping.type === 'static' ? (
+            <Input
+              value={mapping.value}
+              onChange={(e) => onUpdate(varKey, { value: e.target.value })}
+              placeholder="Enter value..."
+              className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500"
+            />
+          ) : mapping.type === 'field' ? (
+            <Select
+              value={mapping.value || undefined}
+              onValueChange={(val) => onUpdate(varKey, { value: val || '' })}
+            >
+              <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
+                <SelectValue placeholder="Select field..." />
+              </SelectTrigger>
+              <SelectContent className="border-slate-700 bg-slate-800">
+                {contactFields.map((field) => (
+                  <SelectItem key={field.value} value={field.value}>
+                    {field.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Select
+              value={mapping.value || undefined}
+              onValueChange={(val) => onUpdate(varKey, { value: val || '' })}
+            >
+              <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
+                <SelectValue
+                  placeholder={
+                    loadingFields
+                      ? 'Loading…'
+                      : customFields.length === 0
+                        ? 'No custom fields'
+                        : 'Select custom field…'
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent className="border-slate-700 bg-slate-800">
+                {customFields.map((f) => (
+                  <SelectItem key={f.id} value={f.id}>
+                    {f.field_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function Step3Personalize({
   template,
   variables,
@@ -105,7 +210,14 @@ export function Step3Personalize({
     };
   }, []);
 
-  const placeholders = useMemo(() => {
+  // Header placeholders use key "header_N"; body placeholders use "N".
+  const headerPlaceholders = useMemo(() => {
+    if (template.header_type !== 'text' || !template.header_content) return [];
+    const matches = template.header_content.match(/\{\{(\d+)\}\}/g);
+    return matches ? [...new Set(matches)].sort() : [];
+  }, [template.header_type, template.header_content]);
+
+  const bodyPlaceholders = useMemo(() => {
     const matches = template.body_text.match(/\{\{(\d+)\}\}/g);
     if (!matches) return [];
     return [...new Set(matches)].sort();
@@ -119,15 +231,18 @@ export function Step3Personalize({
    */
   const unmappedKeys = useMemo(() => {
     const missing: string[] = [];
-    for (const placeholder of placeholders) {
+    for (const placeholder of headerPlaceholders) {
+      const key = `header_${placeholder.replace(/^\{\{|\}\}$/g, '')}`;
+      const mapping = variables[key];
+      if (!mapping || !mapping.value?.trim()) missing.push(`Header ${placeholder}`);
+    }
+    for (const placeholder of bodyPlaceholders) {
       const key = placeholder.replace(/^\{\{|\}\}$/g, '');
       const mapping = variables[key];
-      if (!mapping || !mapping.value?.trim()) {
-        missing.push(placeholder);
-      }
+      if (!mapping || !mapping.value?.trim()) missing.push(placeholder);
     }
     return missing;
-  }, [placeholders, variables]);
+  }, [headerPlaceholders, bodyPlaceholders, variables]);
 
   function updateVariable(key: string, patch: Partial<VariableMapping>) {
     const current = variables[key] ?? { type: 'static' as VariableType, value: '' };
@@ -137,44 +252,68 @@ export function Step3Personalize({
     });
   }
 
+  function resolvePreviewValue(
+    mapping: VariableMapping | undefined,
+    placeholder: string,
+    contact: Contact,
+    customValues: Map<string, string>,
+  ): string {
+    if (!mapping) return placeholder;
+    if (mapping.type === 'static' && mapping.value) return mapping.value;
+    if (mapping.type === 'field' && mapping.value) {
+      const fieldMap: Record<string, string | undefined> = {
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email,
+        company: contact.company,
+      };
+      return fieldMap[mapping.value] ?? placeholder;
+    }
+    if (mapping.type === 'custom_field' && mapping.value) {
+      return customValues.get(mapping.value) || placeholder;
+    }
+    return placeholder;
+  }
+
   /**
    * Substitute placeholders using the first real contact where
-   * possible. Placeholders keyed by "{{N}}" map to variable key "N".
+   * possible. Header uses "header_N" keys; body uses "N" keys.
    */
-  const previewText = useMemo(() => {
+  const { previewHeader, previewText } = useMemo(() => {
     const contact = firstContact ?? SAMPLE_CONTACT;
     const customValues = firstContact
       ? firstContactCustomValues
       : new Map<string, string>();
 
-    let text = template.body_text;
-    for (const placeholder of placeholders) {
-      const key = placeholder.replace(/^\{\{|\}\}$/g, '');
-      const mapping = variables[key];
-      let replacement = placeholder;
-
-      if (mapping) {
-        if (mapping.type === 'static' && mapping.value) {
-          replacement = mapping.value;
-        } else if (mapping.type === 'field' && mapping.value) {
-          const fieldMap: Record<string, string | undefined> = {
-            name: contact.name,
-            phone: contact.phone,
-            email: contact.email,
-            company: contact.company,
-          };
-          replacement = fieldMap[mapping.value] ?? placeholder;
-        } else if (mapping.type === 'custom_field' && mapping.value) {
-          replacement = customValues.get(mapping.value) || placeholder;
-        }
+    let header: string | null = null;
+    if (template.header_type === 'text' && template.header_content) {
+      header = template.header_content;
+      for (const placeholder of headerPlaceholders) {
+        const key = `header_${placeholder.replace(/^\{\{|\}\}$/g, '')}`;
+        header = header.replaceAll(
+          placeholder,
+          resolvePreviewValue(variables[key], placeholder, contact, customValues),
+        );
       }
-      text = text.replaceAll(placeholder, replacement);
     }
-    return text;
+
+    let text = template.body_text;
+    for (const placeholder of bodyPlaceholders) {
+      const key = placeholder.replace(/^\{\{|\}\}$/g, '');
+      text = text.replaceAll(
+        placeholder,
+        resolvePreviewValue(variables[key], placeholder, contact, customValues),
+      );
+    }
+
+    return { previewHeader: header, previewText: text };
   }, [
+    template.header_type,
+    template.header_content,
     template.body_text,
     variables,
-    placeholders,
+    headerPlaceholders,
+    bodyPlaceholders,
     firstContact,
     firstContactCustomValues,
   ]);
@@ -193,119 +332,61 @@ export function Step3Personalize({
         </p>
       </div>
 
-      {placeholders.length === 0 ? (
+      {headerPlaceholders.length === 0 && bodyPlaceholders.length === 0 ? (
         <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-6 text-center">
           <p className="text-sm text-slate-400">
             This template has no variables to personalize.
           </p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {placeholders.map((placeholder) => {
-            const key = placeholder.replace(/^\{\{|\}\}$/g, '');
-            const mapping = variables[key] ?? { type: 'static', value: '' };
+        <div className="space-y-6">
+          {headerPlaceholders.length > 0 && (
+            <div className="space-y-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Header Variables
+              </p>
+              {headerPlaceholders.map((placeholder) => {
+                const key = `header_${placeholder.replace(/^\{\{|\}\}$/g, '')}`;
+                const mapping = variables[key] ?? { type: 'static', value: '' };
+                return (
+                  <VariableRow
+                    key={key}
+                    varKey={key}
+                    placeholder={placeholder}
+                    mapping={mapping}
+                    customFields={customFields}
+                    loadingFields={loadingFields}
+                    onUpdate={updateVariable}
+                  />
+                );
+              })}
+            </div>
+          )}
 
-            return (
-              <div
-                key={placeholder}
-                className="rounded-xl border border-slate-800 bg-slate-900/50 p-4"
-              >
-                <div className="mb-3 flex items-center gap-2">
-                  <span className="inline-flex items-center rounded-md bg-violet-500/10 px-2 py-0.5 text-xs font-mono font-medium text-violet-400">
-                    {placeholder}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-medium text-slate-400">
-                      Mapping Type
-                    </label>
-                    <Select
-                      value={mapping.type}
-                      onValueChange={(val) =>
-                        updateVariable(key, {
-                          type: val as VariableType,
-                          value: '',
-                        })
-                      }
-                    >
-                      <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="border-slate-700 bg-slate-800">
-                        <SelectItem value="static">Static Value</SelectItem>
-                        <SelectItem value="field">Contact Field</SelectItem>
-                        <SelectItem value="custom_field">
-                          Custom Field
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-medium text-slate-400">
-                      {mapping.type === 'static' ? 'Value' : 'Field'}
-                    </label>
-                    {mapping.type === 'static' ? (
-                      <Input
-                        value={mapping.value}
-                        onChange={(e) =>
-                          updateVariable(key, { value: e.target.value })
-                        }
-                        placeholder="Enter value..."
-                        className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500"
-                      />
-                    ) : mapping.type === 'field' ? (
-                      <Select
-                        value={mapping.value || undefined}
-                        onValueChange={(val) =>
-                          updateVariable(key, { value: val || '' })
-                        }
-                      >
-                        <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
-                          <SelectValue placeholder="Select field..." />
-                        </SelectTrigger>
-                        <SelectContent className="border-slate-700 bg-slate-800">
-                          {contactFields.map((field) => (
-                            <SelectItem key={field.value} value={field.value}>
-                              {field.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <Select
-                        value={mapping.value || undefined}
-                        onValueChange={(val) =>
-                          updateVariable(key, { value: val || '' })
-                        }
-                      >
-                        <SelectTrigger className="w-full border-slate-700 bg-slate-800 text-white">
-                          <SelectValue
-                            placeholder={
-                              loadingFields
-                                ? 'Loading…'
-                                : customFields.length === 0
-                                  ? 'No custom fields'
-                                  : 'Select custom field…'
-                            }
-                          />
-                        </SelectTrigger>
-                        <SelectContent className="border-slate-700 bg-slate-800">
-                          {customFields.map((f) => (
-                            <SelectItem key={f.id} value={f.id}>
-                              {f.field_name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+          {bodyPlaceholders.length > 0 && (
+            <div className="space-y-4">
+              {headerPlaceholders.length > 0 && (
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Body Variables
+                </p>
+              )}
+              {bodyPlaceholders.map((placeholder) => {
+                const key = placeholder.replace(/^\{\{|\}\}$/g, '');
+                const mapping = variables[key] ?? { type: 'static', value: '' };
+                return (
+                  <VariableRow
+                    key={key}
+                    varKey={key}
+                    placeholder={placeholder}
+                    mapping={mapping}
+                    customFields={customFields}
+                    loadingFields={loadingFields}
+                    onUpdate={updateVariable}
+                  />
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -322,6 +403,11 @@ export function Step3Personalize({
         </div>
         <div className="rounded-lg bg-[#0e1a12] p-3">
           <div className="ml-auto max-w-[85%] rounded-lg bg-violet-700/30 px-3 py-2 shadow-sm">
+            {previewHeader && (
+              <p className="mb-1 whitespace-pre-wrap text-sm font-semibold text-violet-50">
+                {previewHeader}
+              </p>
+            )}
             <p className="whitespace-pre-wrap text-sm text-violet-50">
               {previewText}
             </p>

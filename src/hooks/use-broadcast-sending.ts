@@ -71,42 +71,63 @@ interface BroadcastApiResult {
 /** contactId → (customFieldId → value). */
 type CustomValueIndex = Map<string, Map<string, string>>;
 
+function resolveValue(
+  v: VariableMapping,
+  contact: Contact,
+  customValues?: Map<string, string>,
+): string {
+  if (v.type === 'static') return v.value;
+  if (v.type === 'field') {
+    const fieldMap: Record<string, string | undefined> = {
+      name: contact.name,
+      phone: contact.phone,
+      email: contact.email,
+      company: contact.company,
+    };
+    return fieldMap[v.value] ?? '';
+  }
+  return customValues?.get(v.value) ?? '';
+}
+
+function numericKeySort(a: string, b: string): number {
+  const an = Number(a);
+  const bn = Number(b);
+  if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+  return a.localeCompare(b);
+}
+
 /**
- * Per-contact resolution of custom-field placeholders. Static and
- * built-in-field mappings resolve synchronously; custom fields read
- * from a pre-built index to avoid N+1 queries during the send loop.
+ * Per-contact resolution of template variable placeholders.
+ *
+ * Keys prefixed with "header_" (e.g. "header_1") belong to the TEXT
+ * header component. All other keys (e.g. "1", "2") belong to the body
+ * component. Returns separate arrays so the caller can send them to
+ * the correct Meta API component slot.
+ *
+ * Backward compatible: old broadcasts stored with only "1"/"2" keys
+ * resolve entirely as bodyParams with headerParams = [].
  */
 export function resolveVariables(
   variables: Record<string, VariableMapping>,
   contact: Contact,
   customValues?: Map<string, string>,
-): string[] {
-  // Keys are typically "1","2",... — numeric-aware sort keeps
-  // {{1}} before {{10}}.
-  const keys = Object.keys(variables).sort((a, b) => {
-    const an = Number(a);
-    const bn = Number(b);
-    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-    return a.localeCompare(b);
-  });
+): { bodyParams: string[]; headerParams: string[] } {
+  const allKeys = Object.keys(variables);
 
-  return keys.map((key) => {
-    const v = variables[key];
-    if (v.type === 'static') return v.value;
+  const headerKeys = allKeys
+    .filter((k) => k.startsWith('header_'))
+    .map((k) => ({ key: k, n: Number(k.replace('header_', '')) }))
+    .sort((a, b) => a.n - b.n)
+    .map((x) => x.key);
 
-    if (v.type === 'field') {
-      const fieldMap: Record<string, string | undefined> = {
-        name: contact.name,
-        phone: contact.phone,
-        email: contact.email,
-        company: contact.company,
-      };
-      return fieldMap[v.value] ?? '';
-    }
+  const bodyKeys = allKeys
+    .filter((k) => !k.startsWith('header_'))
+    .sort(numericKeySort);
 
-    // custom_field
-    return customValues?.get(v.value) ?? '';
-  });
+  return {
+    headerParams: headerKeys.map((k) => resolveValue(variables[k], contact, customValues)),
+    bodyParams: bodyKeys.map((k) => resolveValue(variables[k], contact, customValues)),
+  };
 }
 
 /**
@@ -429,16 +450,20 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
         const apiRecipients = batch
           .filter((r) => r.contact?.phone)
-          .map((r) => ({
-            phone: r.contact!.phone as string,
-            params: r.contact
+          .map((r) => {
+            const { bodyParams, headerParams } = r.contact
               ? resolveVariables(
                   payload.variables,
                   r.contact,
                   customValueIndex.get(r.contact.id),
                 )
-              : [],
-          }));
+              : { bodyParams: [], headerParams: [] };
+            return {
+              phone: r.contact!.phone as string,
+              params: bodyParams,
+              headerParams,
+            };
+          });
 
         if (apiRecipients.length === 0) continue;
 
