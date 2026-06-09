@@ -39,6 +39,8 @@ export default function NewBroadcastPage() {
   const [variables, setVariables] = useState<
     Record<string, { type: 'static' | 'field' | 'custom_field'; value: string }>
   >({});
+  const [headerMedia, setHeaderMedia] = useState('');
+  const [headerMediaId, setHeaderMediaId] = useState('');
   const [name, setName] = useState('');
 
   async function handleSend() {
@@ -56,6 +58,8 @@ export default function NewBroadcastPage() {
           excludeTagIds: audience.excludeTagIds,
         },
         variables,
+        headerMediaUrl: headerMedia || undefined,
+        headerMediaId: headerMediaId || undefined,
       });
       router.push(`/broadcasts/${broadcastId}`);
     } catch (err) {
@@ -198,6 +202,10 @@ export default function NewBroadcastPage() {
               template={template}
               variables={variables}
               onUpdate={setVariables}
+              headerMedia={headerMedia}
+              onHeaderMediaChange={setHeaderMedia}
+              headerMediaId={headerMediaId}
+              onHeaderMediaIdChange={setHeaderMediaId}
               onNext={() => setCurrentStep(3)}
               onBack={() => setCurrentStep(1)}
             />

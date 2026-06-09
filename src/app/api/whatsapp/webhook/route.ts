@@ -32,6 +32,14 @@ interface WhatsAppMessage {
   sticker?: { id: string; mime_type: string }
   location?: { latitude: number; longitude: number; name?: string; address?: string }
   reaction?: { message_id: string; emoji: string }
+  /** Quick-reply button tap — type === 'button' */
+  button?: { payload: string; text: string }
+  /** Interactive button/list reply — type === 'interactive' */
+  interactive?: {
+    type: 'button_reply' | 'list_reply'
+    button_reply?: { id: string; title: string }
+    list_reply?: { id: string; title: string; description?: string }
+  }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
 }
@@ -701,6 +709,22 @@ async function parseMessageContent(
         mediaUrl: null,
         mediaType: null,
       }
+
+    case 'button':
+      return {
+        contentText: message.button?.text || null,
+        mediaUrl: null,
+        mediaType: null,
+      }
+
+    case 'interactive': {
+      const ia = message.interactive
+      const text =
+        ia?.button_reply?.title ||
+        ia?.list_reply?.title ||
+        null
+      return { contentText: text, mediaUrl: null, mediaType: null }
+    }
 
     default:
       return {

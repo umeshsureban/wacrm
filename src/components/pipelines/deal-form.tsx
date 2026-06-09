@@ -289,7 +289,7 @@ export function DealForm({
                 <Label className="text-slate-300">Value</Label>
                 <div className="relative">
                   <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-slate-500">
-                    {currency === "INR" ? "₹" : currency === "EUR" ? "€" : currency === "GBP" ? "£" : "$"}
+                    ₹
                   </span>
                   <Input
                     type="number"

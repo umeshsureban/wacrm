@@ -125,6 +125,10 @@ export interface SendTemplateMessageArgs {
   params?: string[]
   /** Text header component parameters. Required when the template's header type is TEXT and contains {{N}} variables. */
   headerParams?: string[]
+  /** Publicly accessible URL for IMAGE / VIDEO / DOCUMENT header components. */
+  headerMediaUrl?: string
+  /** Meta media ID returned by the /media upload endpoint (takes precedence over headerMediaUrl). */
+  headerMediaId?: string
   /** Meta's message_id of the message being replied to. */
   contextMessageId?: string
 }
@@ -145,6 +149,8 @@ export async function sendTemplateMessage(
     bodyParams,
     params,
     headerParams,
+    headerMediaUrl,
+    headerMediaId,
     contextMessageId,
   } = args
   const url = `${META_API_BASE}/${phoneNumberId}/messages`
@@ -156,9 +162,44 @@ export async function sendTemplateMessage(
 
   const resolvedBody = bodyParams ?? params ?? []
   const resolvedHeader = headerParams ?? []
+
+  // Defensive: empty-string parameters are rejected by Meta with
+  // #131009. Surface a clear error before the API call so callers
+  // see the real cause rather than a cryptic upstream message.
+  const emptyBody = resolvedBody.findIndex((p) => p === '')
+  if (emptyBody !== -1) {
+    throw new Error(
+      `Body parameter {{${emptyBody + 1}}} has an empty value — the contact field mapped to it is blank. Set the field on the contact or use a static value.`,
+    )
+  }
+  const emptyHeader = resolvedHeader.findIndex((p) => p === '')
+  if (emptyHeader !== -1) {
+    throw new Error(
+      `Header parameter {{${emptyHeader + 1}}} has an empty value — the contact field mapped to it is blank.`,
+    )
+  }
+
   const components: Record<string, unknown>[] = []
 
-  if (resolvedHeader.length > 0) {
+  if (headerMediaId) {
+    // Media uploaded via Meta's /media endpoint — use the ID directly.
+    components.push({
+      type: 'header',
+      parameters: [{ type: 'image', image: { id: headerMediaId } }],
+    })
+  } else if (headerMediaUrl) {
+    // Determine media type from URL extension; default to image.
+    const lower = headerMediaUrl.toLowerCase()
+    const mediaType = lower.match(/\.(mp4|mov|avi|mkv)(\?|$)/)
+      ? 'video'
+      : lower.match(/\.(pdf|doc|docx|xls|xlsx|ppt|pptx)(\?|$)/)
+        ? 'document'
+        : 'image'
+    components.push({
+      type: 'header',
+      parameters: [{ type: mediaType, [mediaType]: { link: headerMediaUrl } }],
+    })
+  } else if (resolvedHeader.length > 0) {
     components.push({
       type: 'header',
       parameters: resolvedHeader.map((p) => ({ type: 'text', text: String(p) })),
@@ -247,6 +288,38 @@ export async function sendReactionMessage(
 // ============================================================
 // Media
 // ============================================================
+
+// ── Media upload ────────────────────────────────────────────
+
+export interface UploadMediaArgs {
+  phoneNumberId: string
+  accessToken: string
+  file: Blob
+  mimeType: string
+  filename?: string
+}
+
+/** Upload a file to Meta's media library. Returns the media ID. */
+export async function uploadMedia(args: UploadMediaArgs): Promise<{ id: string }> {
+  const { phoneNumberId, accessToken, file, mimeType, filename = 'upload' } = args
+  const url = `${META_API_BASE}/${phoneNumberId}/media`
+  const form = new FormData()
+  form.append('messaging_product', 'whatsapp')
+  form.append('type', mimeType)
+  form.append('file', new File([file], filename, { type: mimeType }))
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error((err as { error?: { message?: string } }).error?.message ?? 'Media upload failed')
+  }
+  return response.json() as Promise<{ id: string }>
+}
+
+// ── Media download ───────────────────────────────────────────
 
 export interface GetMediaUrlArgs {
   mediaId: string
