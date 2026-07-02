@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
+import { usePresence } from "@/hooks/use-presence";
+import { PresenceDot } from "@/components/presence/presence-dot";
+import { presenceLabel } from "@/lib/presence";
 import { cn } from "@/lib/utils";
 import type {
   Conversation,
@@ -20,6 +23,9 @@ import {
   Check,
   Clock,
   ArrowLeft,
+  RefreshCw,
+  PanelRightOpen,
+  PanelRightClose,
 } from "lucide-react";
 import { format, isToday, isYesterday, differenceInHours } from "date-fns";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +39,12 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageBubble } from "./message-bubble";
 import { MessageActions } from "./message-actions";
-import { MessageComposer } from "./message-composer";
+import {
+  MessageComposer,
+  CHAT_MEDIA_BUCKET,
+  type SendMediaPayload,
+} from "./message-composer";
+import { deleteAccountMedia } from "@/lib/storage/upload-media";
 import { TemplatePicker } from "./template-picker";
 import { buildReplyPreview } from "./reply-quote";
 import { toast } from "sonner";
@@ -70,6 +81,31 @@ interface MessageThreadProps {
    * mobile only.
    */
   onBack?: () => void;
+  /**
+   * Increment to force the messages + reactions fetch effects to refire.
+   * Parent bumps this on realtime reconnect / tab visibility → visible
+   * so the open thread catches up on any events sent while the WS was
+   * disconnected or the tab was throttled. Optional so existing callers
+   * keep working.
+   */
+  resyncToken?: number;
+  /**
+   * Fired by the manual-refresh button in the thread header. The parent
+   * typically bumps the same `resyncToken` it controls — this gives the
+   * user a way to force a refetch when they suspect realtime missed an
+   * event (or they're impatient). Optional so existing callers keep
+   * working; the button is only rendered when this is provided.
+   */
+  onRefresh?: () => void;
+  /**
+   * Desktop-only contact-panel toggle. The page owns the open/closed
+   * state (it's the one that renders the sidebar), so the thread just
+   * reflects it and asks the page to flip it. Both optional so existing
+   * callers keep working; the toggle button only renders when
+   * `onToggleContactPanel` is wired up.
+   */
+  contactPanelOpen?: boolean;
+  onToggleContactPanel?: () => void;
 }
 
 function formatDateSeparator(dateStr: string): string {
@@ -97,10 +133,22 @@ function groupMessagesByDate(messages: Message[]) {
 }
 
 const STATUS_OPTIONS: { label: string; value: ConversationStatus; color: string }[] = [
-  { label: "Open", value: "open", color: "text-violet-400" },
+  { label: "Open", value: "open", color: "text-primary" },
   { label: "Pending", value: "pending", color: "text-amber-400" },
-  { label: "Closed", value: "closed", color: "text-slate-400" },
+  { label: "Closed", value: "closed", color: "text-muted-foreground" },
 ];
+
+/**
+ * WhatsApp-style doodle background applied to the chat area (both the
+ * active thread and the empty state). The SVG tile lives at
+ * `/public/inbox-doodle.svg`; the slate-950 colour sits underneath so
+ * the doodles read as a subtle pattern rather than a stark grid.
+ *
+ * Defined once at module scope so the two render paths can't drift —
+ * if we ever switch the asset, both spots update together.
+ */
+const DOODLE_BG_CLASSES =
+  "bg-background bg-[url('/inbox-doodle.svg')] bg-repeat";
 
 export function MessageThread({
   conversation,
@@ -112,13 +160,40 @@ export function MessageThread({
   onStatusChange,
   onAssignChange,
   onBack,
+  resyncToken = 0,
+  onRefresh,
+  contactPanelOpen,
+  onToggleContactPanel,
 }: MessageThreadProps) {
   const { user } = useAuth();
+  const { getPresence, getRow, now } = usePresence();
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [reactions, setReactions] = useState<MessageReaction[]>([]);
+  // Purely visual spin state for the manual-refresh button. The actual
+  // refetch is fire-and-forget through `onRefresh` (which bumps the
+  // parent's resyncToken); the 700ms spin is just feedback so the click
+  // doesn't feel like a no-op. Cleared via the timer ref on unmount.
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, []);
+  const handleRefreshClick = useCallback(() => {
+    if (isRefreshing || !onRefresh) return;
+    setIsRefreshing(true);
+    onRefresh();
+    refreshTimerRef.current = setTimeout(() => {
+      setIsRefreshing(false);
+      refreshTimerRef.current = null;
+    }, 700);
+  }, [isRefreshing, onRefresh]);
   const [replyTo, setReplyTo] = useState<ReplyDraft | null>(null);
 
   // Profiles are bounded by RLS to rows the current user is allowed to
@@ -219,12 +294,16 @@ export function MessageThread({
     return () => {
       cancelled = true;
     };
-  }, [conversationId]);
+    // `resyncToken` is included so the parent can force a refetch when
+    // the realtime channel reconnects or the tab regains focus —
+    // realtime is best-effort and any message events sent while the WS
+    // was disconnected or throttled are otherwise lost.
+  }, [conversationId, resyncToken]);
 
-  // Reactions: fetch + realtime per conversation. Subscribing here (not at
-  // the page level) keeps the channel scoped to the visible conversation,
-  // matching the message fetch effect above and avoiding cross-conversation
-  // chatter on a busy inbox.
+  // Reactions fetch — pulls the current state from the DB. Kept separate
+  // from the channel subscription below so a `resyncToken` bump just
+  // refetches the rows without also tearing down and rebuilding the
+  // realtime channel.
   useEffect(() => {
     if (!conversationId) {
       setReactions([]);
@@ -245,6 +324,18 @@ export function MessageThread({
       }
       setReactions((data as MessageReaction[]) ?? []);
     })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, resyncToken]);
+
+  // Reactions realtime subscription per conversation. Subscribing here
+  // (not at the page level) keeps the channel scoped to the visible
+  // conversation and avoids cross-conversation chatter on a busy inbox.
+  useEffect(() => {
+    if (!conversationId) return;
+    const supabase = createClient();
 
     const channel = supabase
       .channel(`reactions:${conversationId}`)
@@ -308,7 +399,6 @@ export function MessageThread({
       .subscribe();
 
     return () => {
-      cancelled = true;
       supabase.removeChannel(channel);
     };
   }, [conversationId]);
@@ -405,6 +495,72 @@ export function MessageThread({
     [conversation, onNewMessage, onUpdateMessage]
   );
 
+  const handleSendMedia = useCallback(
+    async (payload: SendMediaPayload) => {
+      if (!conversation) return;
+
+      // Documents show their filename in our own bubble (and to the
+      // recipient as the Meta caption when no caption was typed); other
+      // kinds use the caption as-is. Audio carries no caption.
+      const contentText =
+        payload.kind === "document"
+          ? payload.caption || payload.filename || "Document"
+          : payload.caption;
+
+      const tempId = `temp-${Date.now()}`;
+      const optimisticMsg: Message = {
+        id: tempId,
+        conversation_id: conversation.id,
+        sender_type: "agent",
+        content_type: payload.kind,
+        content_text: contentText,
+        media_url: payload.mediaUrl,
+        status: "sending",
+        created_at: new Date().toISOString(),
+        reply_to_message_id: payload.replyToId,
+      };
+      onNewMessage(optimisticMsg);
+      setReplyTo(null);
+
+      try {
+        const res = await fetch("/api/whatsapp/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversation_id: conversation.id,
+            message_type: payload.kind,
+            media_url: payload.mediaUrl,
+            content_text: contentText,
+            filename: payload.filename,
+            reply_to_message_id: payload.replyToId,
+          }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const reason = data?.error || `HTTP ${res.status}`;
+          console.error("Failed to send media:", reason);
+          toast.error(`Failed to send: ${reason}`);
+          onUpdateMessage(tempId, { status: "failed" });
+          // The upload never reached the recipient — GC the orphaned
+          // object rather than leaving it in the public bucket forever.
+          void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+          return;
+        }
+
+        onUpdateMessage(tempId, { status: "sent" });
+      } catch (err) {
+        console.error("Failed to send media:", err);
+        const reason = err instanceof Error ? err.message : "network error";
+        toast.error(`Failed to send: ${reason}`);
+        onUpdateMessage(tempId, { status: "failed" });
+        void deleteAccountMedia(CHAT_MEDIA_BUCKET, payload.path).catch(() => {});
+      }
+    },
+    [conversation, onNewMessage, onUpdateMessage],
+  );
+
   const handleStatusChange = useCallback(
     async (status: ConversationStatus) => {
       if (!conversation) return;
@@ -425,10 +581,17 @@ export function MessageThread({
   }, []);
 
   const handleSendTemplate = useCallback(
-    async (template: MessageTemplate, params: string[]) => {
+    async (
+      template: MessageTemplate,
+      values: {
+        body: string[];
+        headerText?: string;
+        buttonParams?: Record<number, string>;
+      },
+    ) => {
       if (!conversation) return;
 
-      const renderedBody = renderTemplateBody(template.body_text, params);
+      const renderedBody = renderTemplateBody(template.body_text, values.body);
       const tempId = `temp-${Date.now()}`;
 
       const optimisticMsg: Message = {
@@ -451,7 +614,17 @@ export function MessageThread({
             conversation_id: conversation.id,
             message_type: "template",
             template_name: template.name,
-            template_params: params,
+            template_language: template.language,
+            // Structured params drive the new send-builder path
+            // (header media + URL button substitution). Body values
+            // are mirrored under both shapes so the route can fall
+            // back if the template row isn't found locally.
+            template_message_params: {
+              body: values.body,
+              headerText: values.headerText,
+              buttonParams: values.buttonParams,
+            },
+            template_params: values.body,
             content_text: renderedBody,
           }),
         });
@@ -605,17 +778,19 @@ export function MessageThread({
     [conversation, onAssignChange],
   );
 
-  // Empty state
+  // Empty state — same WhatsApp-style doodle background as the active
+  // thread below, so swapping between empty/selected doesn't change the
+  // pattern under the user's eye.
   if (!conversation || !contact) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center bg-slate-950">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-800">
-          <MessageSquare className="h-8 w-8 text-slate-600" />
+      <div className={cn("flex flex-1 flex-col items-center justify-center", DOODLE_BG_CLASSES)}>
+        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
+          <MessageSquare className="h-8 w-8 text-muted-foreground" />
         </div>
-        <h3 className="mt-4 text-sm font-medium text-slate-400">
+        <h3 className="mt-4 text-sm font-medium text-muted-foreground">
           Select a conversation
         </h3>
-        <p className="mt-1 text-xs text-slate-600">
+        <p className="mt-1 text-xs text-muted-foreground">
           Choose a conversation from the left to start messaging
         </p>
       </div>
@@ -634,9 +809,18 @@ export function MessageThread({
     : "Assign";
 
   return (
-    <div className="flex flex-1 flex-col bg-slate-950">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 border-b border-slate-800 bg-slate-900 px-3 py-3 sm:px-4">
+    // `min-w-0` is load-bearing: the page already puts min-w-0 on the
+    // thread's flex *wrapper* (issue #165), but this root keeps the
+    // default `min-width: auto`, so a single wide message (long unbroken
+    // URL/word) expands the whole thread past its flex share and the chat
+    // paints on top of the contact sidebar at lg+ — outgoing bubbles get
+    // clipped and the hover toolbar overlaps the Tags panel. Letting the
+    // root shrink lets the bubbles' break-words / max-w caps apply.
+    // Issue #257.
+    <div className={cn("flex min-w-0 flex-1 flex-col", DOODLE_BG_CLASSES)}>
+      {/* Header — solid card surface sits on top of the doodle so the
+          name/avatar/dropdowns stay legible. */}
+      <div className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-3 sm:px-4">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           {/* Back-to-list button — mobile only. Hidden on lg+ where the
               conversation list is always visible next to the thread. */}
@@ -645,25 +829,25 @@ export function MessageThread({
               type="button"
               onClick={onBack}
               aria-label="Back to conversations"
-              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md text-slate-300 hover:bg-slate-800 hover:text-white lg:hidden"
+              className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
             >
               <ArrowLeft className="h-5 w-5" />
             </button>
           )}
-          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-slate-700 text-sm font-medium text-white">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium text-foreground">
             {displayName.charAt(0).toUpperCase()}
           </div>
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-white">{displayName}</h2>
-            <p className="truncate text-xs text-slate-400">{contact.phone}</p>
+            <h2 className="truncate text-sm font-semibold text-foreground">{displayName}</h2>
+            <p className="truncate text-xs text-muted-foreground">{contact.phone}</p>
           </div>
           {/* Session timer badge — hidden on the narrowest phones so
               the name + back arrow keep their room. */}
           <Badge
             variant="outline"
             className={cn(
-              "ml-1 hidden gap-1 border-slate-700 text-[10px] sm:inline-flex sm:ml-2",
-              sessionInfo.expired ? "text-red-400" : "text-violet-400"
+              "ml-1 hidden gap-1 border-border text-[10px] sm:inline-flex sm:ml-2",
+              sessionInfo.expired ? "text-red-400" : "text-primary"
             )}
           >
             <Clock className="h-3 w-3" />
@@ -672,18 +856,67 @@ export function MessageThread({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Contact-panel toggle — desktop only. The contact sidebar
+              eats a chunk of horizontal width that crowds the thread on
+              smaller laptops; this lets agents reclaim it when they just
+              want to read and reply. Hidden on mobile, where the sidebar
+              never renders as a permanent panel anyway. Issue #258. */}
+          {onToggleContactPanel && (
+            <button
+              type="button"
+              onClick={onToggleContactPanel}
+              aria-label={
+                contactPanelOpen ? "Hide contact panel" : "Show contact panel"
+              }
+              aria-pressed={contactPanelOpen}
+              title={contactPanelOpen ? "Hide contact" : "Show contact"}
+              className={cn(
+                "hidden h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground lg:inline-flex",
+                contactPanelOpen ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              {contactPanelOpen ? (
+                <PanelRightClose className="h-4 w-4" />
+              ) : (
+                <PanelRightOpen className="h-4 w-4" />
+              )}
+            </button>
+          )}
+
+          {/* Manual refresh — forces a refetch of the messages + the
+              conversation list (the parent bumps its resyncToken). Useful
+              when realtime missed an event or the agent just wants to be
+              sure nothing's stale. Only rendered when the parent wires
+              up `onRefresh`. */}
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={handleRefreshClick}
+              disabled={isRefreshing}
+              aria-label="Refresh conversation"
+              title="Refresh"
+              className={cn(
+                "inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-60",
+              )}
+            >
+              <RefreshCw
+                className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")}
+              />
+            </button>
+          )}
+
           {/* Status dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger className={cn(
-                  "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-slate-800",
-                  currentStatus?.color ?? "text-slate-400"
+                  "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
+                  currentStatus?.color ?? "text-muted-foreground"
                 )}>
                 {currentStatus?.label ?? "Status"}
                 <ChevronDown className="h-3 w-3" />
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="border-slate-700 bg-slate-800"
+              className="border-border bg-popover"
             >
               {STATUS_OPTIONS.map((opt) => (
                 <DropdownMenuItem
@@ -701,8 +934,8 @@ export function MessageThread({
           <DropdownMenu>
             <DropdownMenuTrigger
               className={cn(
-                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-slate-800",
-                assignedAgentId ? "text-violet-400" : "text-slate-400"
+                "inline-flex items-center justify-center h-7 gap-1 px-2 text-xs rounded-md hover:bg-muted",
+                assignedAgentId ? "text-primary" : "text-muted-foreground"
               )}
             >
               <UserPlus className="h-3 w-3" />
@@ -711,24 +944,34 @@ export function MessageThread({
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="border-slate-700 bg-slate-800"
+              className="border-border bg-popover"
             >
               {profiles.length === 0 ? (
-                <DropdownMenuItem disabled className="text-sm text-slate-500">
+                <DropdownMenuItem disabled className="text-sm text-muted-foreground">
                   No teammates available
                 </DropdownMenuItem>
               ) : (
                 profiles.map((p) => {
                   const isSelected = p.user_id === assignedAgentId;
+                  const presence = getPresence(p.user_id);
                   return (
                     <DropdownMenuItem
                       key={p.id}
                       onClick={() => handleAssignChange(p.user_id)}
                       className={cn(
                         "text-sm",
-                        isSelected ? "text-violet-400" : "text-slate-300"
+                        isSelected ? "text-primary" : "text-popover-foreground"
                       )}
                     >
+                      <PresenceDot
+                        status={presence}
+                        label={presenceLabel(
+                          presence,
+                          getRow(p.user_id)?.last_seen_at ?? null,
+                          now
+                        )}
+                        className="mr-2"
+                      />
                       <span className="flex-1">
                         {p.full_name}
                         {p.user_id === user?.id ? " (me)" : ""}
@@ -740,10 +983,10 @@ export function MessageThread({
               )}
               {assignedAgentId && (
                 <>
-                  <DropdownMenuSeparator className="bg-slate-700" />
+                  <DropdownMenuSeparator className="bg-border" />
                   <DropdownMenuItem
                     onClick={() => handleAssignChange(null)}
-                    className="text-sm text-slate-400"
+                    className="text-sm text-muted-foreground"
                   >
                     Unassign
                   </DropdownMenuItem>
@@ -758,12 +1001,12 @@ export function MessageThread({
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12">
-            <p className="text-sm text-slate-500">No messages yet</p>
-            <p className="text-xs text-slate-600">
+            <p className="text-sm text-muted-foreground">No messages yet</p>
+            <p className="text-xs text-muted-foreground">
               Send a template to start the conversation
             </p>
           </div>
@@ -773,7 +1016,7 @@ export function MessageThread({
               <div key={group.date}>
                 {/* Date separator */}
                 <div className="mb-4 flex items-center justify-center">
-                  <span className="rounded-full bg-slate-800 px-3 py-1 text-[10px] font-medium text-slate-400">
+                  <span className="rounded-full bg-muted px-3 py-1 text-[10px] font-medium text-muted-foreground">
                     {formatDateSeparator(group.date)}
                   </span>
                 </div>
@@ -832,6 +1075,7 @@ export function MessageThread({
         conversationId={conversation.id}
         sessionExpired={sessionInfo.expired}
         onSend={handleSend}
+        onSendMedia={handleSendMedia}
         onOpenTemplates={handleOpenTemplates}
         replyTo={replyTo}
         onClearReply={() => setReplyTo(null)}

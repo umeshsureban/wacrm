@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import { useAuth } from '@/hooks/use-auth';
 import { Contact, MessageTemplate } from '@/types';
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
@@ -38,8 +39,13 @@ interface BroadcastPayload {
   template: MessageTemplate;
   audience: AudienceConfig;
   variables: Record<string, VariableMapping>;
+  /**
+   * Media URL for an IMAGE/VIDEO/DOCUMENT header. Required at send
+   * time for media-header templates — Meta rejects the send without
+   * it. Passed through as `messageParams.headerMediaUrl`; the builder
+   * falls back to the template's stored URL only when this is empty.
+   */
   headerMediaUrl?: string;
-  headerMediaId?: string;
 }
 
 interface UseBroadcastSendingReturn {
@@ -73,79 +79,42 @@ interface BroadcastApiResult {
 /** contactId → (customFieldId → value). */
 type CustomValueIndex = Map<string, Map<string, string>>;
 
-// Returns null when the field is absent on this contact so the
-// caller can skip the send rather than passing an empty string to
-// Meta (which rejects it with #131009).
-function resolveValue(
-  v: VariableMapping,
-  contact: Contact,
-  customValues?: Map<string, string>,
-): string | null {
-  if (v.type === 'static') return v.value;
-  if (v.type === 'field') {
-    const fieldMap: Record<string, string | undefined> = {
-      name: contact.name,
-      phone: contact.phone,
-      email: contact.email,
-      company: contact.company,
-    };
-    const val = fieldMap[v.value];
-    return val != null && val !== '' ? val : null;
-  }
-  const val = customValues?.get(v.value);
-  return val != null && val !== '' ? val : null;
-}
-
-function numericKeySort(a: string, b: string): number {
-  const an = Number(a);
-  const bn = Number(b);
-  if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
-  return a.localeCompare(b);
-}
-
 /**
- * Per-contact resolution of template variable placeholders.
- *
- * Keys prefixed with "header_" (e.g. "header_1") belong to the TEXT
- * header component. All other keys (e.g. "1", "2") belong to the body
- * component. Returns separate arrays so the caller can send them to
- * the correct Meta API component slot.
- *
- * Backward compatible: old broadcasts stored with only "1"/"2" keys
- * resolve entirely as bodyParams with headerParams = [].
+ * Per-contact resolution of custom-field placeholders. Static and
+ * built-in-field mappings resolve synchronously; custom fields read
+ * from a pre-built index to avoid N+1 queries during the send loop.
  */
 export function resolveVariables(
   variables: Record<string, VariableMapping>,
   contact: Contact,
   customValues?: Map<string, string>,
-): { bodyParams: string[]; headerParams: string[]; missingKeys: string[] } {
-  const allKeys = Object.keys(variables);
-
-  const headerKeys = allKeys
-    .filter((k) => k.startsWith('header_'))
-    .map((k) => ({ key: k, n: Number(k.replace('header_', '')) }))
-    .sort((a, b) => a.n - b.n)
-    .map((x) => x.key);
-
-  const bodyKeys = allKeys
-    .filter((k) => !k.startsWith('header_'))
-    .sort(numericKeySort);
-
-  const missingKeys: string[] = [];
-
-  const headerParams = headerKeys.map((k) => {
-    const val = resolveValue(variables[k], contact, customValues);
-    if (val === null) missingKeys.push(k);
-    return val ?? '';
+): string[] {
+  // Keys are typically "1","2",... — numeric-aware sort keeps
+  // {{1}} before {{10}}.
+  const keys = Object.keys(variables).sort((a, b) => {
+    const an = Number(a);
+    const bn = Number(b);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+    return a.localeCompare(b);
   });
 
-  const bodyParams = bodyKeys.map((k) => {
-    const val = resolveValue(variables[k], contact, customValues);
-    if (val === null) missingKeys.push(k);
-    return val ?? '';
-  });
+  return keys.map((key) => {
+    const v = variables[key];
+    if (v.type === 'static') return v.value;
 
-  return { bodyParams, headerParams, missingKeys };
+    if (v.type === 'field') {
+      const fieldMap: Record<string, string | undefined> = {
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email,
+        company: contact.company,
+      };
+      return fieldMap[v.value] ?? '';
+    }
+
+    // custom_field
+    return customValues?.get(v.value) ?? '';
+  });
 }
 
 /**
@@ -179,6 +148,7 @@ async function fetchCustomValueIndex(
 }
 
 export function useBroadcastSending(): UseBroadcastSendingReturn {
+  const { accountId } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
@@ -259,6 +229,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     if (!user) {
       throw new Error('You are not signed in.');
     }
+    if (!accountId) {
+      throw new Error('Your profile is not linked to an account.');
+    }
 
     // De-duplicate by phone within the CSV (users can paste duplicates).
     const uniqueByPhone = new Map<string, { phone: string; name?: string }>();
@@ -288,6 +261,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       .filter((p) => !byPhone.has(p))
       .map((phone) => ({
         user_id: user.id,
+        account_id: accountId,
         phone,
         name: uniqueByPhone.get(phone)?.name ?? null,
       }));
@@ -365,6 +339,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       if (!user) {
         throw new Error('You are not signed in.');
       }
+      if (!accountId) {
+        throw new Error('Your profile is not linked to an account.');
+      }
 
       // ── Step 1: Resolve audience contacts ─────────────────────────
       setProgress(5);
@@ -380,6 +357,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         .from('broadcasts')
         .insert({
           user_id: user.id,
+          account_id: accountId,
           name: payload.name,
           template_name: payload.template.name,
           template_language: payload.template.language ?? 'en_US',
@@ -463,127 +441,107 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       let failedCount = 0;
       const totalRecipients = recipients.length;
 
+      // Media-header templates (image/video/document) require a media
+      // URL on every send. Collected in the personalize step and applied
+      // to all recipients; falls back to the template's stored URL on the
+      // server when omitted.
+      const headerType = payload.template.header_type;
+      const isMediaHeader =
+        headerType === 'image' ||
+        headerType === 'video' ||
+        headerType === 'document';
+      const headerMediaUrl = payload.headerMediaUrl?.trim();
+      const messageParams =
+        isMediaHeader && headerMediaUrl ? { headerMediaUrl } : undefined;
+
       for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
         const batch = recipients.slice(i, i + SEND_BATCH_SIZE);
 
-        // Resolve variables per-contact and separate sendable from
-        // contacts whose mapped fields are null/empty (those get marked
-        // failed with a clear message instead of sending an empty string
-        // parameter to Meta, which rejects it with #131009).
-        type Resolved = {
-          recipient: (typeof batch)[number];
-          params: string[];
-          headerParams: string[];
-        };
-        const sendable: Resolved[] = [];
+        const apiRecipients = batch
+          .filter((r) => r.contact?.phone)
+          .map((r) => ({
+            phone: r.contact!.phone as string,
+            params: r.contact
+              ? resolveVariables(
+                  payload.variables,
+                  r.contact,
+                  customValueIndex.get(r.contact.id),
+                )
+              : [],
+            ...(messageParams ? { messageParams } : {}),
+          }));
 
-        for (const r of batch) {
-          if (!r.contact?.phone) {
-            failedCount++;
-            await supabase
-              .from('broadcast_recipients')
-              .update({ status: 'failed', error_message: 'No phone number on contact' })
-              .eq('id', r.id);
-            continue;
+        if (apiRecipients.length === 0) continue;
+
+        try {
+          const res = await fetch('/api/whatsapp/broadcast', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              recipients: apiRecipients,
+              template_name: payload.template.name,
+              template_language: payload.template.language ?? 'en_US',
+            }),
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            throw new Error(data.error || 'Broadcast API request failed');
           }
 
-          const { bodyParams, headerParams, missingKeys } = r.contact
-            ? resolveVariables(
-                payload.variables,
-                r.contact,
-                customValueIndex.get(r.contact.id),
-              )
-            : { bodyParams: [], headerParams: [], missingKeys: [] };
-
-          if (missingKeys.length > 0) {
-            failedCount++;
-            await supabase
-              .from('broadcast_recipients')
-              .update({
-                status: 'failed',
-                error_message: `Contact field(s) ${missingKeys.join(', ')} have no value — set the field on this contact and retry.`,
-              })
-              .eq('id', r.id);
-            continue;
+          const resultsByPhone = new Map<string, BroadcastApiResult>();
+          for (const r of (data.results ?? []) as BroadcastApiResult[]) {
+            resultsByPhone.set(r.phone, r);
           }
 
-          sendable.push({ recipient: r, params: bodyParams, headerParams });
-        }
+          for (const recipient of batch) {
+            const phone = recipient.contact?.phone;
+            const result = phone ? resultsByPhone.get(phone) : undefined;
 
-        if (sendable.length > 0) {
-          try {
-            const res = await fetch('/api/whatsapp/broadcast', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                recipients: sendable.map(({ recipient, params, headerParams }) => ({
-                  phone: recipient.contact!.phone as string,
-                  params,
-                  headerParams,
-                })),
-                template_name: payload.template.name,
-                template_language: payload.template.language ?? 'en_US',
-                header_media_url: payload.headerMediaUrl,
-                header_media_id: payload.headerMediaId,
-              }),
-            });
-
-            const data = await res.json();
-
-            if (!res.ok) {
-              throw new Error(data.error || 'Broadcast API request failed');
-            }
-
-            const resultsByPhone = new Map<string, BroadcastApiResult>();
-            for (const r of (data.results ?? []) as BroadcastApiResult[]) {
-              resultsByPhone.set(r.phone, r);
-            }
-
-            for (const { recipient } of sendable) {
-              const phone = recipient.contact!.phone as string;
-              const result = resultsByPhone.get(phone);
-
-              if (!result) {
-                failedCount++;
-                await supabase
-                  .from('broadcast_recipients')
-                  .update({ status: 'failed', error_message: 'No result returned from API' })
-                  .eq('id', recipient.id);
-                continue;
-              }
-
-              if (result.status === 'sent') {
-                await supabase
-                  .from('broadcast_recipients')
-                  .update({
-                    status: 'sent',
-                    sent_at: new Date().toISOString(),
-                    whatsapp_message_id: result.whatsapp_message_id ?? null,
-                    error_message: null,
-                  })
-                  .eq('id', recipient.id);
-              } else {
-                failedCount++;
-                await supabase
-                  .from('broadcast_recipients')
-                  .update({
-                    status: 'failed',
-                    error_message: result.error ?? 'Unknown error',
-                  })
-                  .eq('id', recipient.id);
-              }
-            }
-          } catch (err) {
-            for (const { recipient } of sendable) {
+            if (!result) {
               failedCount++;
               await supabase
                 .from('broadcast_recipients')
                 .update({
                   status: 'failed',
-                  error_message: err instanceof Error ? err.message : 'Unknown error',
+                  error_message: 'No phone number on contact',
+                })
+                .eq('id', recipient.id);
+              continue;
+            }
+
+            if (result.status === 'sent') {
+              await supabase
+                .from('broadcast_recipients')
+                .update({
+                  status: 'sent',
+                  sent_at: new Date().toISOString(),
+                  whatsapp_message_id: result.whatsapp_message_id ?? null,
+                  error_message: null,
+                })
+                .eq('id', recipient.id);
+            } else {
+              failedCount++;
+              await supabase
+                .from('broadcast_recipients')
+                .update({
+                  status: 'failed',
+                  error_message: result.error ?? 'Unknown error',
                 })
                 .eq('id', recipient.id);
             }
+          }
+        } catch (err) {
+          for (const recipient of batch) {
+            failedCount++;
+            await supabase
+              .from('broadcast_recipients')
+              .update({
+                status: 'failed',
+                error_message: err instanceof Error ? err.message : 'Unknown error',
+              })
+              .eq('id', recipient.id);
           }
         }
 

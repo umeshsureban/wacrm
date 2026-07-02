@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import { MessageTemplate } from '@/types';
 import { Button } from '@/components/ui/button';
-import { Loader2, FileText, ArrowRight, RefreshCw } from 'lucide-react';
+import { Loader2, FileText, ArrowRight } from 'lucide-react';
 
 const categoryColors: Record<string, string> = {
   Marketing: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
@@ -22,51 +22,37 @@ interface Step1Props {
 export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack }: Step1Props) {
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [syncMsg, setSyncMsg] = useState<string | null>(null);
 
-  async function fetchTemplates() {
-    try {
-      const supabase = createClient();
-      const { data, error: fetchError } = await supabase
-        .from('message_templates')
-        .select('*')
-        .order('created_at', { ascending: false });
+  useEffect(() => {
+    async function fetchTemplates() {
+      try {
+        const supabase = createClient();
+        // Only APPROVED templates can be sent via Meta — anything else
+        // would 400 at broadcast time. Hide them rather than letting
+        // the user pick a template that will fail.
+        const { data, error: fetchError } = await supabase
+          .from('message_templates')
+          .select('*')
+          .eq('status', 'APPROVED')
+          .order('created_at', { ascending: false });
 
-      if (fetchError) throw fetchError;
-      setTemplates(data ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load templates');
-    } finally {
-      setLoading(false);
+        if (fetchError) throw fetchError;
+        setTemplates(data ?? []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load templates');
+      } finally {
+        setLoading(false);
+      }
     }
-  }
 
-  useEffect(() => { fetchTemplates(); }, []);
-
-  async function handleSync() {
-    setSyncing(true);
-    setSyncMsg(null);
-    setError(null);
-    try {
-      const res = await fetch('/api/whatsapp/templates/sync', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Sync failed');
-      setSyncMsg(`Synced ${data.total} templates from Meta (${data.inserted} new, ${data.updated} updated).`);
-      // Reload the local list to reflect the fresh data.
-      await fetchTemplates();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sync failed');
-    } finally {
-      setSyncing(false);
-    }
-  }
+    fetchTemplates();
+  }, []);
 
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-violet-500" />
+        <Loader2 className="h-6 w-6 animate-spin text-primary" />
       </div>
     );
   }
@@ -81,40 +67,18 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-semibold text-white">Choose a Template</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            Select an approved message template for your broadcast.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleSync}
-          disabled={syncing}
-          className="shrink-0 border-slate-700 text-slate-300 hover:bg-slate-800"
-        >
-          {syncing ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-          {syncing ? 'Syncing…' : 'Sync from Meta'}
-        </Button>
+      <div>
+        <h2 className="text-lg font-semibold text-foreground">Choose a Template</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Select an approved message template for your broadcast.
+        </p>
       </div>
 
-      {syncMsg && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
-          {syncMsg}
-        </div>
-      )}
-
       {templates.length === 0 ? (
-        <div className="flex h-48 flex-col items-center justify-center rounded-xl border border-slate-800 bg-slate-900/50">
-          <FileText className="mb-2 h-8 w-8 text-slate-600" />
-          <p className="text-sm text-slate-400">No templates available.</p>
-          <p className="mt-1 text-xs text-slate-500">Create a template in Settings first.</p>
+        <div className="flex h-48 flex-col items-center justify-center rounded-xl border border-border bg-card/50">
+          <FileText className="mb-2 h-8 w-8 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">No templates available.</p>
+          <p className="mt-1 text-xs text-muted-foreground">Create a template in Settings first.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -128,27 +92,24 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
                 onClick={() => onSelect(template)}
                 className={`flex flex-col gap-3 rounded-xl border p-4 text-left transition-all ${
                   isSelected
-                    ? 'border-violet-500 bg-violet-500/5 ring-1 ring-violet-500/30'
-                    : 'border-slate-800 bg-slate-900/50 hover:border-slate-700 hover:bg-slate-900'
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+                    : 'border-border bg-card/50 hover:border-border hover:bg-card'
                 }`}
               >
                 <div className="flex items-start justify-between">
-                  <h3 className="text-sm font-medium text-white">{template.name}</h3>
+                  <h3 className="text-sm font-medium text-foreground">{template.name}</h3>
                   <span
                     className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${catColor}`}
                   >
                     {template.category}
                   </span>
                 </div>
-                <p className="line-clamp-3 text-xs text-slate-400">{template.body_text}</p>
-                <div className="flex items-center gap-2 text-[10px] text-slate-500">
+                <p className="line-clamp-3 text-xs text-muted-foreground">{template.body_text}</p>
+                <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
                   <span>{template.language ?? 'en_US'}</span>
-                  {template.status && (
-                    <>
-                      <span>-</span>
-                      <span>{template.status}</span>
-                    </>
-                  )}
+                  {/* Status is omitted on purpose — every template
+                      shown here is already filtered to APPROVED,
+                      so the chip carried no information. */}
                 </div>
               </button>
             );
@@ -156,14 +117,14 @@ export function Step1ChooseTemplate({ selectedTemplate, onSelect, onNext, onBack
         </div>
       )}
 
-      <div className="flex items-center justify-between border-t border-slate-800 pt-4">
-        <Button variant="outline" onClick={onBack} className="border-slate-700 text-slate-300">
+      <div className="flex items-center justify-between border-t border-border pt-4">
+        <Button variant="outline" onClick={onBack} className="border-border text-muted-foreground">
           Back
         </Button>
         <Button
           onClick={onNext}
           disabled={!selectedTemplate}
-          className="bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50"
+          className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           Next
           <ArrowRight className="h-4 w-4" />
