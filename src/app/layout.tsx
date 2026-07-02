@@ -19,8 +19,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "MATU on WhatsApp",
-  description: "MATU on WhatsApp — self-hostable WhatsApp business CRM.",
+  title: "Matu on Whatsapp",
+  description: "Matu on Whatsapp — self-hostable WhatsApp business CRM.",
   robots: {
     index: false,
     follow: false,
