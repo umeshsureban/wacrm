@@ -9,6 +9,89 @@ Versions follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0, `MINOR` bumps cover new modules; `PATCH` bumps cover bug fixes
 and polish.
 
+## [0.7.0] — 2026-07-02
+
+Promotes the AI assistant to a first-class **AI Agents** section in the
+sidebar — it's no longer tucked inside Settings.
+
+### Added
+
+- **AI Agents (sidebar).** A dedicated `/agents` area with two tabs:
+  - **Playground** — a test chat to message your agent and see its
+    grounded, multi-turn replies (and where it would hand off to a human)
+    *before* it ever answers a real customer. Runs the exact same path as
+    the auto-reply bot (knowledge-base retrieval + your provider), and
+    works even before you flip the master switch on, so you can try, then
+    enable. Backed by `POST /api/ai/playground`.
+  - **Setup** — the provider/key, business context, knowledge base, and
+    auto-reply controls (moved here from Settings → AI Assistant).
+
+### Changed
+
+- The AI configuration moved out of **Settings → AI Assistant** into the
+  new **AI Agents** section. No data change — same account config, new
+  home. No migration required.
+
+## [0.6.0] — 2026-07-02
+
+Adds an **AI knowledge base** so the assistant (0.5.0) can answer from
+your own content instead of handing off. Paste FAQs, policies, or
+product details under **Settings → AI Assistant → Knowledge base**; the
+relevant excerpts are retrieved into every draft and auto-reply.
+
+### Added
+
+- **Knowledge base with hybrid retrieval.** Lexical Postgres full-text
+  search works for every account with no extra credentials. Optional
+  **semantic search** (pgvector, OpenAI `text-embedding-3-small`) turns
+  on when you add an **embeddings key** — semantic-primary, topped up
+  with lexical to fill the result set. Anthropic-only accounts (Anthropic
+  has no embeddings API) keep the lexical path with zero extra setup.
+- **Knowledge base manager** in Settings — add/edit/delete documents and
+  a **Reindex** action to backfill embeddings after adding a key. Both
+  drafts and the auto-reply bot are grounded in the retrieved excerpts,
+  and the prompt still instructs the model to hand off (auto-reply) or
+  say it will follow up (draft) when the KB doesn't cover the question.
+  **Migration required:** apply `supabase/migrations/030_ai_knowledge.sql`
+  (enables `pgvector`; adds `ai_knowledge_documents` + `ai_knowledge_chunks`
+  and an `embeddings_api_key` column on `ai_configs`).
+
+## [0.5.0] — 2026-07-02
+
+Adds the **AI reply assistant** — bring-your-own-key. Each account
+pastes its own OpenAI or Anthropic key under **Settings → AI
+Assistant**; wacrm calls the provider directly with that key, so
+there's no per-seat AI fee and your conversation data never leaves
+your own infrastructure for a wacrm-run service. The key is stored
+AES-256-GCM-encrypted at rest (same as WhatsApp tokens) and never
+returned to the client after saving.
+
+### Added
+
+- **AI-drafted replies in the inbox.** A ✨ button in the composer
+  (agent+) reads the recent conversation and drops a suggested reply
+  into the box for the agent to edit and send. Read-only server-side —
+  `POST /api/ai/draft` never sends or stores anything. Respects your
+  business context / persona from the settings prompt.
+- **AI auto-reply bot.** When enabled, inbound messages that no
+  deterministic Flow consumed and that have no agent assigned get an
+  automatic LLM reply. Bounded by a per-conversation cap
+  (`auto_reply_max_per_conversation`, default 3) and a clean human
+  handoff: when the model can't confidently help — or the customer
+  asks for a person — it stays silent and leaves the message for a
+  human, and won't auto-reply on that thread again until re-enabled.
+  Flows always win over the bot.
+- **Settings → AI Assistant** (admin+ to edit): pick provider + model,
+  paste your key, add business context/tone, toggle the assistant and
+  auto-reply, set the per-conversation cap, and **Test key** against
+  the provider before saving.
+- Providers: OpenAI (Chat Completions) and Anthropic (Messages) behind
+  one interface; model is a free-text field with sensible defaults, so
+  you can point it at any current model your key can access.
+  **Migration required:** apply
+  `supabase/migrations/029_ai_reply.sql` (adds `ai_configs` +
+  per-conversation auto-reply columns on `conversations`).
+
 ## [0.4.0] — 2026-07-01
 
 Completes the public API (#245): **outbound event webhooks** so
