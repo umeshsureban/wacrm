@@ -8,6 +8,7 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import { validateAiCredentials } from '@/lib/ai/validate'
 import { embedTexts } from '@/lib/ai/embeddings'
+import { sanitizeCaptureFields } from '@/lib/ai/config'
 import { AiError, type AiProvider } from '@/lib/ai/types'
 
 function bad(message: string) {
@@ -30,7 +31,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, api_key, embeddings_api_key',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, api_key, embeddings_api_key, capture_enabled, capture_fields',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -46,11 +47,12 @@ export async function GET() {
     if (!data) return NextResponse.json({ configured: false })
     // The keys are selected only to derive the has_* flags; neither is
     // returned to the client.
-    const { api_key, embeddings_api_key, ...safe } = data
+    const { api_key, embeddings_api_key, capture_fields, ...safe } = data
     return NextResponse.json({
       configured: true,
       has_key: !!api_key,
       has_embeddings_key: !!embeddings_api_key,
+      capture_fields: sanitizeCaptureFields(capture_fields),
       ...safe,
     })
   } catch (err) {
@@ -90,6 +92,8 @@ export async function POST(request: Request) {
         : null
     const isActive = body.is_active === true
     const autoReplyEnabled = body.auto_reply_enabled === true
+    const captureEnabled = body.capture_enabled === true
+    const captureFields = sanitizeCaptureFields(body.capture_fields)
 
     let maxPer = Number(body.auto_reply_max_per_conversation)
     if (!Number.isFinite(maxPer)) maxPer = 3
@@ -187,6 +191,8 @@ export async function POST(request: Request) {
       is_active: isActive,
       auto_reply_enabled: autoReplyEnabled,
       auto_reply_max_per_conversation: maxPer,
+      capture_enabled: captureEnabled,
+      capture_fields: captureFields,
     }
     if (rawEmbeddingsKey) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
