@@ -199,6 +199,52 @@ describe('generateReply — Google', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('strips leaked <thought> blocks from Gemma output', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      okResponse({
+        choices: [
+          {
+            message: {
+              content:
+                '<thought>Customer said hi. I should greet and ask their name.</thought>Hi! May I know your name?',
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await generateReply({
+      config: config({ provider: 'google', model: 'gemma-4-26b-a4b-it' }),
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+
+    expect(res.text).toBe('Hi! May I know your name?')
+    // The request should also ask for minimal thinking up front.
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.extra_body.google.thinking_config.thinking_level).toBe('minimal')
+  })
+
+  it('treats a reply that is only an unclosed thought as empty', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        okResponse({
+          choices: [{ message: { content: '<thought>partial reasoning cut off' } }],
+        }),
+      ),
+    )
+
+    await expect(
+      generateReply({
+        config: config({ provider: 'google' }),
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    ).rejects.toMatchObject({ code: 'empty_response' })
+  })
+
   it('does not retry a 401', async () => {
     const fetchMock = vi
       .fn()

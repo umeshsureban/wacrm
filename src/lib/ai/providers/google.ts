@@ -27,6 +27,22 @@ const RETRY_DELAYS_MS = [500, 1500]
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
+ * Gemma 4 is a thinking model and leaks its reasoning into the content
+ * as `<thought>…</thought>` blocks. We ask for minimal thinking in the
+ * request, but the API is known to ignore thinking flags for Gemma
+ * (google-gemini/cookbook#1198), so strip any blocks that get through.
+ * An unclosed `<thought>` means the reply was cut off mid-reasoning —
+ * drop everything from it onward rather than show half a chain of
+ * thought to a customer.
+ */
+export function stripThoughts(text: string): string {
+  let out = text.replace(/<thought>[\s\S]*?<\/thought>/g, '')
+  const dangling = out.indexOf('<thought>')
+  if (dangling !== -1) out = out.slice(0, dangling)
+  return out.trim()
+}
+
+/**
  * Call the Gemini API (OpenAI-compat layer) with the caller's own key.
  * Returns the raw assistant text (handoff parsing happens in
  * `generateReply`).
@@ -43,6 +59,17 @@ export async function generateGoogle(args: ProviderArgs): Promise<string> {
     // The compat layer documents `max_tokens` (not OpenAI's newer
     // `max_completion_tokens`).
     max_tokens: MAX_OUTPUT_TOKENS,
+    // Keep replies fast and free of chain-of-thought: minimal thinking
+    // budget, no thought parts. `include_thoughts` alone is a no-op on
+    // Gemma 4, hence the thinking level + stripThoughts() belt-and-braces.
+    extra_body: {
+      google: {
+        thinking_config: {
+          thinking_level: 'minimal',
+          include_thoughts: false,
+        },
+      },
+    },
   })
 
   let res: Response
@@ -72,8 +99,9 @@ export async function generateGoogle(args: ProviderArgs): Promise<string> {
   }
 
   const data = (await res.json().catch(() => null)) as GoogleResponse | null
-  const text = data?.choices?.[0]?.message?.content
-  if (!text || typeof text !== 'string' || !text.trim()) {
+  const raw = data?.choices?.[0]?.message?.content
+  const text = typeof raw === 'string' ? stripThoughts(raw) : ''
+  if (!text) {
     throw new AiError('Google returned an empty response.', {
       code: 'empty_response',
     })
