@@ -10,6 +10,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
+import { createClient } from '@/lib/supabase/client';
 import {
   Card,
   CardContent,
@@ -30,7 +32,7 @@ import {
   AI_PROVIDER_DEFAULT_MODEL,
   AI_PROVIDER_MODEL_OPTIONS,
 } from '@/lib/ai/defaults';
-import type { AiProvider } from '@/lib/ai/types';
+import type { AiProvider, CaptureFieldTarget } from '@/lib/ai/types';
 
 const MASKED_KEY = '••••••••••••••••';
 
@@ -69,6 +71,11 @@ export function AiConfig() {
   const [isActive, setIsActive] = useState(false);
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
   const [maxPerConversation, setMaxPerConversation] = useState(3);
+  const [captureEnabled, setCaptureEnabled] = useState(false);
+  const [captureFields, setCaptureFields] = useState<CaptureFieldTarget[]>([]);
+  const [customFields, setCustomFields] = useState<
+    { id: string; field_name: string }[]
+  >([]);
 
   // Guard keyed on the account (not a bare boolean) so an in-place
   // account switch — ownership transfer, multi-account membership —
@@ -99,6 +106,10 @@ export function AiConfig() {
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
+        setCaptureEnabled(data.capture_enabled === true);
+        setCaptureFields(
+          Array.isArray(data.capture_fields) ? data.capture_fields : [],
+        );
       }
     } catch {
       toast.error('Failed to load AI configuration');
@@ -112,6 +123,18 @@ export function AiConfig() {
     loadedAccountIdRef.current = accountId;
     void fetchConfig();
   }, [accountId, fetchConfig]);
+
+  // The account's custom fields, offered as lead-capture targets.
+  // RLS-scoped browser client, same pattern as custom-field-manager.
+  useEffect(() => {
+    if (!accountId) return;
+    const supabase = createClient();
+    supabase
+      .from('custom_fields')
+      .select('id, field_name')
+      .order('created_at')
+      .then(({ data }) => setCustomFields(data ?? []));
+  }, [accountId]);
 
   // Swap the model default when the provider changes, unless the user
   // typed a custom model.
@@ -130,6 +153,19 @@ export function AiConfig() {
     }
   };
 
+  const sameTarget = (a: CaptureFieldTarget, b: CaptureFieldTarget) =>
+    a.kind === 'builtin' && b.kind === 'builtin'
+      ? a.key === b.key
+      : a.kind === 'custom' && b.kind === 'custom' && a.id === b.id;
+  const captureHas = (t: CaptureFieldTarget) =>
+    captureFields.some((f) => sameTarget(f, t));
+  const toggleCapture = (t: CaptureFieldTarget) =>
+    setCaptureFields((prev) =>
+      prev.some((f) => sameTarget(f, t))
+        ? prev.filter((f) => !sameTarget(f, t))
+        : [...prev, t],
+    );
+
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
 
   // undefined = leave unchanged; '' typed = null (clear); text = set.
@@ -145,6 +181,8 @@ export function AiConfig() {
     is_active: isActive,
     auto_reply_enabled: autoReplyEnabled,
     auto_reply_max_per_conversation: maxPerConversation,
+    capture_enabled: captureEnabled,
+    capture_fields: captureFields,
   });
 
   const handleTest = async () => {
@@ -486,6 +524,78 @@ export function AiConfig() {
               />
             </div>
           </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle className="text-base">Lead capture</CardTitle>
+                <CardDescription>
+                  After each customer message, the AI fills empty contact
+                  fields with facts the customer stated — it never overwrites
+                  an existing value.
+                </CardDescription>
+              </div>
+              <Switch
+                checked={captureEnabled}
+                onCheckedChange={setCaptureEnabled}
+                disabled={disabled}
+              />
+            </div>
+          </CardHeader>
+          {captureEnabled && (
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Built-in fields</Label>
+                <div className="flex flex-wrap gap-4">
+                  {(['name', 'email', 'company'] as const).map((key) => (
+                    <label
+                      key={key}
+                      className="flex cursor-pointer items-center gap-2 text-sm capitalize text-foreground"
+                    >
+                      <Checkbox
+                        checked={captureHas({ kind: 'builtin', key })}
+                        onCheckedChange={() =>
+                          toggleCapture({ kind: 'builtin', key })
+                        }
+                        disabled={disabled}
+                      />
+                      {key}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Custom fields</Label>
+                {customFields.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No custom fields yet — create them under Settings → Fields
+                    &amp; tags (e.g. BHK, Budget, Location), then pick them
+                    here.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-4">
+                    {customFields.map((cf) => (
+                      <label
+                        key={cf.id}
+                        className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
+                      >
+                        <Checkbox
+                          checked={captureHas({ kind: 'custom', id: cf.id })}
+                          onCheckedChange={() =>
+                            toggleCapture({ kind: 'custom', id: cf.id })
+                          }
+                          disabled={disabled}
+                        />
+                        {cf.field_name}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          )}
         </Card>
 
         <AiKnowledgeCard
