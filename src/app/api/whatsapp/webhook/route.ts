@@ -8,6 +8,7 @@ import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import { dispatchLeadCapture } from '@/lib/ai/capture'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
   handleTemplateWebhookChange,
@@ -796,6 +797,18 @@ async function processMessage(
       conversationId: conversation.id,
       contactId: contactRecord.id,
       configOwnerUserId,
+    })
+  }
+
+  // AI lead capture. Independent of auto-reply — runs even when a human
+  // owns the thread or a flow consumed the message, because customer
+  // facts are worth capturing either way. Gated internally on
+  // capture_enabled + at least one empty target field; never throws.
+  if (inboundText.trim()) {
+    await dispatchLeadCapture({
+      accountId,
+      conversationId: conversation.id,
+      contactId: contactRecord.id,
     })
   }
 
