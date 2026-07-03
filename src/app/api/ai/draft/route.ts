@@ -67,7 +67,7 @@ export async function POST(request: Request) {
     if (!config) {
       return NextResponse.json(
         {
-          error: 'AI assistant is not set up. Enable it in Settings → AI Assistant.',
+          error: 'AI assistant is not set up. Enable it in AI Agents → Setup.',
           code: 'ai_not_configured',
         },
         { status: 400 },
