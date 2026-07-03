@@ -26,7 +26,10 @@ import {
 } from '@/components/ui/select';
 import { SettingsPanelHead } from './settings-panel-head';
 import { AiKnowledgeCard } from './ai-knowledge';
-import { AI_PROVIDER_DEFAULT_MODEL } from '@/lib/ai/defaults';
+import {
+  AI_PROVIDER_DEFAULT_MODEL,
+  AI_PROVIDER_MODEL_OPTIONS,
+} from '@/lib/ai/defaults';
 import type { AiProvider } from '@/lib/ai/types';
 
 const MASKED_KEY = '••••••••••••••••';
@@ -34,11 +37,13 @@ const MASKED_KEY = '••••••••••••••••';
 const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic (Claude)',
+  google: 'Google (Gemini)',
 };
 
 const KEY_PLACEHOLDER: Record<AiProvider, string> = {
   openai: 'sk-...',
   anthropic: 'sk-ant-...',
+  google: 'AIza...',
 };
 
 export function AiConfig() {
@@ -113,10 +118,16 @@ export function AiConfig() {
   const handleProviderChange = (next: AiProvider) => {
     setProvider(next);
     const isDefaultModel =
-      model === AI_PROVIDER_DEFAULT_MODEL.openai ||
-      model === AI_PROVIDER_DEFAULT_MODEL.anthropic ||
+      Object.values(AI_PROVIDER_DEFAULT_MODEL).includes(model) ||
       model.trim() === '';
-    if (isDefaultModel) setModel(AI_PROVIDER_DEFAULT_MODEL[next]);
+    // A model from another provider's suggestion list won't exist on the
+    // new provider either — reset those too.
+    const isOtherProviderOption = Object.entries(AI_PROVIDER_MODEL_OPTIONS).some(
+      ([p, models]) => p !== next && models.includes(model),
+    );
+    if (isDefaultModel || isOtherProviderOption) {
+      setModel(AI_PROVIDER_DEFAULT_MODEL[next]);
+    }
   };
 
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
@@ -263,19 +274,49 @@ export function AiConfig() {
                     <SelectItem value="anthropic">
                       {PROVIDER_LABEL.anthropic}
                     </SelectItem>
+                    <SelectItem value="google">{PROVIDER_LABEL.google}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="ai-model">Model</Label>
-                <Input
-                  id="ai-model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
-                  disabled={disabled}
-                />
+                {AI_PROVIDER_MODEL_OPTIONS[provider] ? (
+                  <Select
+                    value={model}
+                    onValueChange={(v) => {
+                      if (v) setModel(v);
+                    }}
+                    disabled={disabled}
+                  >
+                    <SelectTrigger id="ai-model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {/* Keep a previously saved custom model selectable so
+                          the dropdown never renders empty. */}
+                      {[
+                        ...new Set(
+                          [...AI_PROVIDER_MODEL_OPTIONS[provider], model].filter(
+                            Boolean,
+                          ),
+                        ),
+                      ].map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id="ai-model"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
+                    disabled={disabled}
+                  />
+                )}
               </div>
             </div>
 

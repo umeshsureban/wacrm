@@ -107,6 +107,64 @@ describe('generateReply — OpenAI', () => {
   })
 })
 
+describe('generateReply — Google', () => {
+  it('calls the Gemini OpenAI-compat endpoint and returns the reply', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        okResponse({ choices: [{ message: { content: 'Olá! Como posso ajudar?' } }] }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await generateReply({
+      config: config({ provider: 'google', apiKey: 'AIza-test', model: 'gemma-4-26b-a4b-it' }),
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Oi' }],
+    })
+
+    expect(res).toEqual({ text: 'Olá! Como posso ajudar?', handoff: false })
+    const [url, opts] = fetchMock.mock.calls[0]
+    expect(url).toContain('generativelanguage.googleapis.com')
+    expect(url).toContain('/openai/chat/completions')
+    expect(opts.headers.Authorization).toBe('Bearer AIza-test')
+    const body = JSON.parse(opts.body)
+    expect(body.model).toBe('gemma-4-26b-a4b-it')
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'sys' })
+    expect(body.max_tokens).toBeGreaterThan(0)
+  })
+
+  it('maps a 401 to an invalid_key AiError', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        errResponse(401, { error: { message: 'API key not valid' } }),
+      ),
+    )
+
+    await expect(
+      generateReply({
+        config: config({ provider: 'google' }),
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Hi' }],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_key', status: 401 })
+  })
+
+  it('throws on an empty completion', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(okResponse({ choices: [{ message: { content: '' } }] })),
+    )
+    await expect(
+      generateReply({
+        config: config({ provider: 'google' }),
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Hi' }],
+      }),
+    ).rejects.toBeInstanceOf(AiError)
+  })
+})
+
 describe('generateReply — Anthropic', () => {
   it('calls the messages endpoint with the version header and parses text blocks', async () => {
     const fetchMock = vi

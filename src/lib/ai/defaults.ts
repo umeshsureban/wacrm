@@ -13,6 +13,16 @@ import type { AiProvider } from './types'
 export const AI_PROVIDER_DEFAULT_MODEL: Record<AiProvider, string> = {
   openai: 'gpt-5.4-mini',
   anthropic: 'claude-haiku-4-5-20251001',
+  google: 'gemma-4-26b-a4b-it',
+}
+
+/**
+ * Suggested model IDs per provider. When a provider has entries here
+ * the settings form renders the model field as a dropdown of these
+ * options; providers without entries keep the free-text input.
+ */
+export const AI_PROVIDER_MODEL_OPTIONS: Partial<Record<AiProvider, string[]>> = {
+  google: ['gemma-4-26b-a4b-it', 'gemma-4-31b-it'],
 }
 
 /**
