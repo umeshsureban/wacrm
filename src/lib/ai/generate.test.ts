@@ -163,6 +163,57 @@ describe('generateReply — Google', () => {
       }),
     ).rejects.toBeInstanceOf(AiError)
   })
+
+  it('retries a transient 500 and succeeds on the next attempt', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(errResponse(500, { error: { message: 'Internal' } }))
+      .mockResolvedValueOnce(
+        okResponse({ choices: [{ message: { content: 'Recovered!' } }] }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const res = await generateReply({
+      config: config({ provider: 'google' }),
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'Hi' }],
+    })
+
+    expect(res.text).toBe('Recovered!')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up after exhausting retries on persistent 500s', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(errResponse(500, { error: { message: 'Internal' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      generateReply({
+        config: config({ provider: 'google' }),
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Hi' }],
+      }),
+    ).rejects.toMatchObject({ code: 'provider_error' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry a 401', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(errResponse(401, { error: { message: 'bad key' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      generateReply({
+        config: config({ provider: 'google' }),
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'Hi' }],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_key' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('generateReply — Anthropic', () => {
