@@ -8,6 +8,13 @@
 
 export type AiProvider = 'openai' | 'anthropic' | 'google'
 
+export type CaptureBuiltinKey = 'name' | 'email' | 'company'
+
+/** One field the AI should fill on the contact (lead capture). */
+export type CaptureFieldTarget =
+  | { kind: 'builtin'; key: CaptureBuiltinKey }
+  | { kind: 'custom'; id: string }
+
 /**
  * Account AI setup, decrypted and ready to use. Produced by
  * `loadAiConfig` — `apiKey` is the plaintext BYO provider key
@@ -25,6 +32,9 @@ export interface AiConfig {
    *  knowledge base is embedded and semantic retrieval turns on; when
    *  null, retrieval falls back to lexical full-text search. */
   embeddingsApiKey: string | null
+  /** Lead capture: extract customer-stated facts into contact fields. */
+  captureEnabled: boolean
+  captureFields: CaptureFieldTarget[]
 }
 
 /** A single conversation turn in the shape both providers accept. */

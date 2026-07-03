@@ -6,7 +6,7 @@ vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: (v: string) => `plain:${v}`,
 }))
 
-import { loadAiConfig } from './config'
+import { loadAiConfig, sanitizeCaptureFields } from './config'
 
 function dbReturning(row: Record<string, unknown> | null): SupabaseClient {
   const chain = {
@@ -27,6 +27,11 @@ const ROW = {
   auto_reply_enabled: false,
   auto_reply_max_per_conversation: 3,
   embeddings_api_key: null,
+  capture_enabled: true,
+  capture_fields: [
+    { kind: 'builtin', key: 'name' },
+    { kind: 'custom', id: 'cf-1' },
+  ],
 }
 
 describe('loadAiConfig requireActive', () => {
@@ -41,11 +46,40 @@ describe('loadAiConfig requireActive', () => {
     expect(config).not.toBeNull()
     expect(config!.provider).toBe('openai')
     expect(config!.apiKey).toBe('plain:enc-key')
+    expect(config!.captureEnabled).toBe(true)
+    expect(config!.captureFields).toEqual([
+      { kind: 'builtin', key: 'name' },
+      { kind: 'custom', id: 'cf-1' },
+    ])
   })
 
   it('returns null when there is no row', async () => {
     expect(
       await loadAiConfig(dbReturning(null), 'acct', { requireActive: false }),
     ).toBeNull()
+  })
+})
+
+describe('sanitizeCaptureFields', () => {
+  it('keeps valid builtin and custom targets, drops junk', () => {
+    expect(
+      sanitizeCaptureFields([
+        { kind: 'builtin', key: 'name' },
+        { kind: 'custom', id: 'cf-1' },
+        { kind: 'builtin', key: 'phone' }, // invalid builtin
+        { kind: 'custom' }, // missing id
+        'nonsense',
+        null,
+      ]),
+    ).toEqual([
+      { kind: 'builtin', key: 'name' },
+      { kind: 'custom', id: 'cf-1' },
+    ])
+  })
+
+  it('returns [] for non-arrays', () => {
+    expect(sanitizeCaptureFields(null)).toEqual([])
+    expect(sanitizeCaptureFields('x')).toEqual([])
+    expect(sanitizeCaptureFields({})).toEqual([])
   })
 })

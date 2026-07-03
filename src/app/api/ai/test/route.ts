@@ -72,6 +72,8 @@ export async function POST(request: Request) {
         autoReplyEnabled: false,
         autoReplyMaxPerConversation: 3,
         embeddingsApiKey: null,
+        captureEnabled: false,
+        captureFields: [],
       })
     } catch (err) {
       if (err instanceof AiError) {
