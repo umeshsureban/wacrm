@@ -74,6 +74,7 @@ function captureConfig(overrides: Partial<AiConfig> = {}): AiConfig {
     isActive: true,
     autoReplyEnabled: false,
     autoReplyMaxPerConversation: 3,
+    handoffAgentId: null,
     embeddingsApiKey: null,
     captureEnabled: true,
     captureFields: [

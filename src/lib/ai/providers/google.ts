@@ -1,7 +1,8 @@
-import { AiError } from '../types'
+import { AiError, type ProviderResult } from '../types'
 import { MAX_OUTPUT_TOKENS } from '../defaults'
 import {
   mergeConsecutive,
+  normalizeUsage,
   providerHttpError,
   toNetworkError,
   type ProviderArgs,
@@ -15,6 +16,11 @@ const GOOGLE_URL =
 
 interface GoogleResponse {
   choices?: { message?: { content?: string } }[]
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  }
 }
 
 // Gemini returns intermittent 500/503 INTERNAL errors under load
@@ -44,10 +50,10 @@ export function stripThoughts(text: string): string {
 
 /**
  * Call the Gemini API (OpenAI-compat layer) with the caller's own key.
- * Returns the raw assistant text (handoff parsing happens in
- * `generateReply`).
+ * Returns the raw assistant text + token usage (handoff parsing happens
+ * in `generateReply`).
  */
-export async function generateGoogle(args: ProviderArgs): Promise<string> {
+export async function generateGoogle(args: ProviderArgs): Promise<ProviderResult> {
   const { apiKey, model, systemPrompt, messages, timeoutMs } = args
 
   const body = JSON.stringify({
@@ -106,5 +112,10 @@ export async function generateGoogle(args: ProviderArgs): Promise<string> {
       code: 'empty_response',
     })
   }
-  return text
+  const usage = normalizeUsage({
+    prompt: data?.usage?.prompt_tokens,
+    completion: data?.usage?.completion_tokens,
+    total: data?.usage?.total_tokens,
+  })
+  return { text, usage }
 }

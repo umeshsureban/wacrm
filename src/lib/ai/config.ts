@@ -10,13 +10,14 @@ interface AiConfigRow {
   is_active: boolean
   auto_reply_enabled: boolean
   auto_reply_max_per_conversation: number
+  handoff_agent_id: string | null
   embeddings_api_key: string | null
   capture_enabled: boolean | null
   capture_fields: unknown
 }
 
 const CONFIG_COLUMNS =
-  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, embeddings_api_key, capture_enabled, capture_fields'
+  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields'
 
 const CAPTURE_BUILTIN_KEYS = new Set(['name', 'email', 'company'])
 const MAX_CAPTURE_FIELDS = 20
@@ -106,6 +107,7 @@ export async function loadAiConfig(
     isActive: row.is_active,
     autoReplyEnabled: row.auto_reply_enabled,
     autoReplyMaxPerConversation: row.auto_reply_max_per_conversation,
+    handoffAgentId: row.handoff_agent_id,
     embeddingsApiKey,
     captureEnabled: row.capture_enabled === true,
     captureFields: sanitizeCaptureFields(row.capture_fields),
