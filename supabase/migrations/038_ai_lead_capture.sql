@@ -1,5 +1,5 @@
 -- ============================================================
--- 032_ai_lead_capture.sql — AI lead capture config
+-- 038_ai_lead_capture.sql — AI lead capture config
 --
 -- Lets the AI assistant extract facts the customer stated (name,
 -- budget, etc.) into contact fields after each inbound message.
