@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { BarChart3, Bot, PencilLine } from 'lucide-react';
+import { BarChart3, Bot, PencilLine, UserSearch } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
 import {
@@ -36,6 +36,8 @@ interface UsageResponse {
   by_mode: {
     auto_reply: { calls: number; tokens: number };
     draft: { calls: number; tokens: number };
+    // Optional so the UI tolerates an older API during a rolling deploy.
+    lead_capture?: { calls: number; tokens: number };
   };
   by_model: {
     model: string;
@@ -142,13 +144,18 @@ export function AiUsageCard() {
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
               <Stat label="Total tokens" value={formatCompactNumber(data.totals.total_tokens)} />
               <Stat label="LLM calls" value={String(data.totals.calls)} />
               <Stat
                 label="Auto-reply"
                 value={formatCompactNumber(data.by_mode.auto_reply.tokens)}
                 icon={Bot}
+              />
+              <Stat
+                label="Lead capture"
+                value={formatCompactNumber(data.by_mode.lead_capture?.tokens ?? 0)}
+                icon={UserSearch}
               />
               <Stat
                 label="Drafts"

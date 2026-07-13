@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   buildConversationContext: vi.fn(),
   generateReply: vi.fn(),
   engineSendText: vi.fn(),
+  logAiUsage: vi.fn(),
   state: {
     contact: null as Record<string, unknown> | null,
     customFieldDefs: [] as Record<string, unknown>[],
@@ -33,6 +34,7 @@ vi.mock('./config', async (importOriginal) => ({
 vi.mock('./context', () => ({ buildConversationContext: h.buildConversationContext }))
 vi.mock('./generate', () => ({ generateReply: h.generateReply }))
 vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }))
+vi.mock('./usage', () => ({ logAiUsage: h.logAiUsage }))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -198,6 +200,8 @@ beforeEach(() => {
   }
   h.engineSendText.mockReset()
   h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'wamid.1' })
+  h.logAiUsage.mockReset()
+  h.logAiUsage.mockResolvedValue(undefined)
   h.loadAiConfig.mockResolvedValue(captureConfig())
   h.buildConversationContext.mockResolvedValue([
     { role: 'user', content: 'I am Ravi, want 3 BHK' },
@@ -250,6 +254,25 @@ describe('dispatchLeadCapture', () => {
   it('never throws when the provider errors', async () => {
     h.generateReply.mockRejectedValue(new Error('provider down'))
     await expect(dispatchLeadCapture(ARGS)).resolves.toBeUndefined()
+  })
+
+  it('logs token spend as lead_capture usage', async () => {
+    const usage = { promptTokens: 100, completionTokens: 20, totalTokens: 120 }
+    h.generateReply.mockResolvedValue({
+      text: '{"name":"Ravi","BHK":"3 BHK"}',
+      handoff: false,
+      usage,
+    })
+    await dispatchLeadCapture(ARGS)
+    expect(h.logAiUsage).toHaveBeenCalledTimes(1)
+    expect(h.logAiUsage).toHaveBeenCalledWith(expect.anything(), {
+      accountId: 'acct-1',
+      conversationId: 'conv-1',
+      mode: 'lead_capture',
+      provider: 'openai',
+      model: 'gpt-test',
+      usage,
+    })
   })
 })
 

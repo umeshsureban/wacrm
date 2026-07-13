@@ -107,14 +107,15 @@ export async function POST(request: Request) {
     const { text, usage } = await generateReply({ config, systemPrompt, messages })
 
     // Record spend on the account's BYO key. Best-effort + via the
-    // service role (the log has no `authenticated` INSERT policy). This
-    // must not fail or delay the draft the agent is waiting on, so:
-    //  - the whole thing is wrapped (constructing the admin client throws
-    //    if the service-role key is unset — that must not 500 the draft);
-    //  - it's fire-and-forget (`void`), not awaited, so the response
-    //    isn't held for a DB round-trip.
+    // service role (the log has no `authenticated` INSERT policy). The
+    // whole thing is wrapped (constructing the admin client throws if
+    // the service-role key is unset — that must not 500 the draft).
+    // Awaited: a detached promise can be frozen when the route context
+    // ends before the insert lands, and `logAiUsage` swallows its own
+    // errors, so awaiting adds only one small round-trip and can't fail
+    // the draft.
     try {
-      void logAiUsage(supabaseAdmin(), {
+      await logAiUsage(supabaseAdmin(), {
         accountId,
         conversationId,
         mode: 'draft',

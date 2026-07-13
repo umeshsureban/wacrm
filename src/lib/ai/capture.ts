@@ -5,6 +5,7 @@ import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
 import { generateReply } from './generate'
 import { engineSendText } from '@/lib/flows/meta-send'
+import { logAiUsage } from './usage'
 
 // ============================================================
 // AI lead capture — extract customer-stated facts into contact
@@ -213,11 +214,25 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
     const messages = await buildConversationContext(db, conversationId)
     if (messages.length === 0) return
 
-    const { text } = await generateReply({
+    const { text, usage } = await generateReply({
       config,
       systemPrompt: buildCapturePrompt(emptyTargets),
       messages,
     })
+
+    // Record token spend — capture runs on every inbound with empty
+    // fields, so it's real money on the account's BYO key. Awaited
+    // (detached promises get frozen in the webhook's `after()` block);
+    // `logAiUsage` swallows its own errors.
+    await logAiUsage(db, {
+      accountId,
+      conversationId,
+      mode: 'lead_capture',
+      provider: config.provider,
+      model: config.model,
+      usage,
+    })
+
     const values = parseCaptureJson(text)
     if (Object.keys(values).length === 0) return
 
