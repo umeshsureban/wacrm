@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
     existingDeals: [] as Record<string, unknown>[],
     dealInsert: null as Record<string, unknown> | null,
     dealInsertError: null as { message: string } | null,
+    dealUpdate: null as Record<string, unknown> | null,
     stageRow: null as Record<string, unknown> | null,
   },
 }))
@@ -76,18 +77,21 @@ vi.mock('./admin-client', () => ({
         }
       }
       if (table === 'deals') {
-        return {
-          select: () => ({
-            eq: () => ({
-              limit: () =>
-                Promise.resolve({ data: h.state.existingDeals, error: null }),
-            }),
-          }),
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          order: () => chain,
+          limit: () => Promise.resolve({ data: h.state.existingDeals, error: null }),
           insert: (payload: Record<string, unknown>) => {
             h.state.dealInsert = payload
             return Promise.resolve({ error: h.state.dealInsertError })
           },
+          update: (payload: Record<string, unknown>) => {
+            h.state.dealUpdate = payload
+            return { eq: () => Promise.resolve({ error: null }) }
+          },
         }
+        return chain
       }
       if (table === 'pipeline_stages') {
         return {
@@ -160,6 +164,8 @@ function captureConfig(overrides: Partial<AiConfig> = {}): AiConfig {
     captureCompleteReply: null,
     agentCategory: null,
     captureDealStageId: null,
+    captureVisitFieldId: null,
+    captureVisitStageId: null,
     ...overrides,
   }
 }
@@ -184,6 +190,7 @@ beforeEach(() => {
   h.state.existingDeals = []
   h.state.dealInsert = null
   h.state.dealInsertError = null
+  h.state.dealUpdate = null
   h.state.stageRow = {
     id: 'stage-1',
     pipeline_id: 'pipe-1',
@@ -402,5 +409,96 @@ describe('deal on qualification', () => {
     expect(h.state.conversationUpdate).toMatchObject({
       ai_autoreply_disabled: true,
     })
+  })
+})
+
+describe('optional capture fields', () => {
+  const REPLY = 'Our team has your details.'
+
+  it('optional fields never gate the completion', async () => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({
+        captureCompleteReply: REPLY,
+        captureFields: [
+          { kind: 'builtin', key: 'name' },
+          { kind: 'builtin', key: 'email', optional: true },
+          { kind: 'custom', id: 'cf-1' },
+        ],
+      }),
+    )
+    // Model finds name + BHK, but no email — completion must fire anyway.
+    await dispatchLeadCapture(ARGS)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-fire completion on a pass where only optional fields were missing', async () => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({
+        captureCompleteReply: REPLY,
+        captureFields: [
+          { kind: 'builtin', key: 'name' },
+          { kind: 'builtin', key: 'email', optional: true },
+        ],
+      }),
+    )
+    h.state.contact = { name: 'Ravi', email: null, company: null }
+    h.generateReply.mockResolvedValue({
+      text: '{"email":"ravi@test.com"}',
+      handoff: false,
+    })
+    await dispatchLeadCapture(ARGS)
+    // The email is still captured…
+    expect(h.state.contactUpdate).toEqual({ email: 'ravi@test.com' })
+    // …but no completion machinery runs (that happened when the last
+    // REQUIRED field filled).
+    expect(h.state.claimAttempted).toBe(false)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+})
+
+describe('visit-booked deal move', () => {
+  beforeEach(() => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({
+        captureFields: [{ kind: 'custom', id: 'cf-visit', optional: true }],
+        captureVisitFieldId: 'cf-visit',
+        captureVisitStageId: 'stage-visit',
+      }),
+    )
+    h.state.customFieldDefs = [
+      { id: 'cf-visit', field_name: 'Visit Slot', field_type: 'text', field_options: null },
+    ]
+    h.state.contact = { name: 'Ravi', email: null, company: null }
+    h.generateReply.mockResolvedValue({
+      text: '{"Visit Slot":"Sunday 11am"}',
+      handoff: false,
+    })
+    h.state.existingDeals = [{ id: 'deal-1', notes: 'name: Ravi', stage_id: 'stage-hot' }]
+  })
+
+  it('moves the open deal and appends the slot to its notes', async () => {
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealUpdate).toMatchObject({
+      stage_id: 'stage-1', // the resolved stage row's id from the mock
+      notes: 'name: Ravi\nSite visit: Sunday 11am',
+    })
+    // Visit slot alone never triggers the completion machinery.
+    expect(h.state.claimAttempted).toBe(false)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when the contact has no open deal', async () => {
+    h.state.existingDeals = []
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealUpdate).toBeNull()
+  })
+
+  it("skips the move when the stage isn't this account's", async () => {
+    h.state.stageRow = {
+      id: 'stage-1',
+      pipelines: { account_id: 'acct-OTHER' },
+    }
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealUpdate).toBeNull()
   })
 })

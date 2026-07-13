@@ -21,6 +21,9 @@ export interface ResolvedTarget {
   label: string
   fieldType: string
   options: string[]
+  /** Optional fields are extracted when mentioned but never gate the
+   *  qualification-complete reply/deal. */
+  optional: boolean
 }
 
 const BUILTIN_DESCRIPTION: Record<CaptureBuiltinKey, string> = {
@@ -134,11 +137,13 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
 
     // ---- Resolve targets and find which are still empty ----
     const builtinTargets = config.captureFields.filter(
-      (f): f is { kind: 'builtin'; key: CaptureBuiltinKey } => f.kind === 'builtin',
+      (f): f is { kind: 'builtin'; key: CaptureBuiltinKey; optional?: boolean } =>
+        f.kind === 'builtin',
     )
     const customTargets = config.captureFields.filter(
-      (f): f is { kind: 'custom'; id: string } => f.kind === 'custom',
+      (f): f is { kind: 'custom'; id: string; optional?: boolean } => f.kind === 'custom',
     )
+    const customOptional = new Map(customTargets.map((t) => [t.id, t.optional === true]))
 
     const { data: contact, error: contactErr } = await db
       .from('contacts')
@@ -160,6 +165,7 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         label: t.key,
         fieldType: 'text',
         options: [],
+        optional: t.optional === true,
       })
       usedKeys.add(t.key)
     }
@@ -196,6 +202,7 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
           label: String(def.field_name),
           fieldType: String(def.field_type ?? 'text'),
           options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
+          optional: customOptional.get(def.id) === true,
         })
       }
     }
@@ -236,12 +243,16 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
     }
 
     // ---- Qualification complete ----
-    // Fires only on the transition: this pass had empty targets and the
-    // extraction just filled every one of them. Contacts that were fully
-    // qualified before the feature shipped never trip this (they exit at
-    // the `emptyTargets.length === 0` early-return above).
-    const remaining = emptyTargets.filter((t) => !values[t.jsonKey])
+    // Fires only on the transition: this pass had empty REQUIRED targets
+    // and the extraction just filled the last of them. Optional fields
+    // (email, visit slot, …) keep capturing but never gate this.
+    // Contacts fully qualified before the feature shipped never trip it
+    // (they exit at the `emptyTargets.length === 0` early-return above,
+    // and the ai_qualified_at claim guards the rest).
+    const remaining = emptyTargets.filter((t) => !t.optional && !values[t.jsonKey])
+    const requiredWereMissing = emptyTargets.some((t) => !t.optional)
     if (
+      requiredWereMissing &&
       remaining.length === 0 &&
       (config.captureCompleteReply || config.captureDealStageId)
     ) {
@@ -252,6 +263,28 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         configOwnerUserId,
         config,
       })
+    }
+
+    // ---- Site visit booked ----
+    // Runs after the completion block so a deal created this very pass
+    // is moved too. Fires whenever capture fills the configured visit
+    // field — including after handoff, from the customer's own words.
+    if (config.captureVisitFieldId && config.captureVisitStageId) {
+      const visitRow = customRows.find(
+        (r) => r.custom_field_id === config.captureVisitFieldId,
+      )
+      if (visitRow) {
+        try {
+          await moveDealOnVisitBooked(db, {
+            accountId,
+            contactId,
+            config,
+            slot: visitRow.value,
+          })
+        } catch (err) {
+          console.error('[ai lead-capture] visit-stage move failed:', err)
+        }
+      }
     }
   } catch (err) {
     console.error('[ai lead-capture] dispatch failed:', err)
@@ -416,6 +449,62 @@ async function createQualificationDeal(
     status: 'open',
   })
   if (insErr) throw insErr
+}
+
+/**
+ * The customer just agreed a site-visit slot: move their open deal to
+ * the configured stage and stamp the slot into the deal notes. Only
+ * moves an existing deal — if none exists yet (visit volunteered
+ * before qualification), the deal will be created at qualification
+ * with the slot already in its notes via `buildDealNotes`.
+ */
+async function moveDealOnVisitBooked(
+  db: SupabaseClient,
+  args: {
+    accountId: string
+    contactId: string
+    config: AiConfig
+    slot: string
+  },
+): Promise<void> {
+  const { accountId, contactId, config, slot } = args
+
+  // Stage must still belong to this account (same guard as creation).
+  const { data: stage } = await db
+    .from('pipeline_stages')
+    .select('id, pipelines!inner(account_id)')
+    .eq('id', config.captureVisitStageId!)
+    .maybeSingle()
+  const pipeline = stage?.pipelines as { account_id: string } | null | undefined
+  if (!stage || !pipeline || pipeline.account_id !== accountId) {
+    console.warn(
+      `[ai lead-capture] configured visit stage ${config.captureVisitStageId} not found for account ${accountId} — skipping move.`,
+    )
+    return
+  }
+
+  const { data: deals } = await db
+    .from('deals')
+    .select('id, notes, stage_id')
+    .eq('contact_id', contactId)
+    .eq('status', 'open')
+    .order('created_at', { ascending: false })
+    .limit(1)
+  const deal = deals?.[0]
+  if (!deal) return // nothing on the board yet
+
+  const line = `Site visit: ${slot}`
+  const notes =
+    deal.notes && String(deal.notes).includes(line)
+      ? deal.notes
+      : deal.notes
+        ? `${deal.notes}\n${line}`
+        : line
+
+  await db
+    .from('deals')
+    .update({ stage_id: stage.id, notes, updated_at: new Date().toISOString() })
+    .eq('id', deal.id)
 }
 
 /**

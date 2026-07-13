@@ -82,4 +82,18 @@ describe('sanitizeCaptureFields', () => {
     expect(sanitizeCaptureFields('x')).toEqual([])
     expect(sanitizeCaptureFields({})).toEqual([])
   })
+
+  it('preserves the optional flag (and drops non-true values)', () => {
+    expect(
+      sanitizeCaptureFields([
+        { kind: 'builtin', key: 'email', optional: true },
+        { kind: 'custom', id: 'cf-1', optional: 'yes' }, // not boolean true
+        { kind: 'builtin', key: 'name', optional: false },
+      ]),
+    ).toEqual([
+      { kind: 'builtin', key: 'email', optional: true },
+      { kind: 'custom', id: 'cf-1' },
+      { kind: 'builtin', key: 'name' },
+    ])
+  })
 })

@@ -32,7 +32,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category, capture_deal_stage_id',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category, capture_deal_stage_id, capture_visit_field_id, capture_visit_stage_id',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -132,6 +132,45 @@ export async function POST(request: Request) {
         return bad('capture_deal_stage_id must be a pipeline stage of this account')
       }
       captureDealStageId = rawDealStage
+    }
+
+    // Visit-booked auto-move: a custom field (the agreed slot) plus the
+    // stage the deal moves to. Same provided/empty/absent contract.
+    const visitFieldProvided = 'capture_visit_field_id' in body
+    const rawVisitField =
+      typeof body.capture_visit_field_id === 'string'
+        ? body.capture_visit_field_id.trim()
+        : ''
+    let captureVisitFieldId: string | null = null
+    if (rawVisitField) {
+      const { data: fieldRow } = await supabase
+        .from('custom_fields')
+        .select('id')
+        .eq('id', rawVisitField)
+        .eq('account_id', accountId)
+        .maybeSingle()
+      if (!fieldRow) {
+        return bad('capture_visit_field_id must be a custom field of this account')
+      }
+      captureVisitFieldId = rawVisitField
+    }
+    const visitStageProvided = 'capture_visit_stage_id' in body
+    const rawVisitStage =
+      typeof body.capture_visit_stage_id === 'string'
+        ? body.capture_visit_stage_id.trim()
+        : ''
+    let captureVisitStageId: string | null = null
+    if (rawVisitStage) {
+      const { data: stageRow } = await supabase
+        .from('pipeline_stages')
+        .select('id, pipelines!inner(account_id)')
+        .eq('id', rawVisitStage)
+        .eq('pipelines.account_id', accountId)
+        .maybeSingle()
+      if (!stageRow) {
+        return bad('capture_visit_stage_id must be a pipeline stage of this account')
+      }
+      captureVisitStageId = rawVisitStage
     }
 
     let maxPer = Number(body.auto_reply_max_per_conversation)
@@ -249,6 +288,8 @@ export async function POST(request: Request) {
           captureCompleteReply: null,
           agentCategory: null,
           captureDealStageId: null,
+          captureVisitFieldId: null,
+          captureVisitStageId: null,
         })
       } catch (err) {
         if (err instanceof AiError) {
@@ -296,6 +337,8 @@ export async function POST(request: Request) {
     if (completeReplyProvided) shared.capture_complete_reply = captureCompleteReply
     if (categoryProvided) shared.agent_category = agentCategory
     if (dealStageProvided) shared.capture_deal_stage_id = captureDealStageId
+    if (visitFieldProvided) shared.capture_visit_field_id = captureVisitFieldId
+    if (visitStageProvided) shared.capture_visit_stage_id = captureVisitStageId
     if (rawEmbeddingsKey) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
     } else if (clearEmbeddingsKey) {
