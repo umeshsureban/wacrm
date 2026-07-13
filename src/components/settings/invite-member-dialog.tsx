@@ -37,7 +37,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useTranslations } from 'next-intl';
-import { useAuth } from '@/hooks/use-auth';
 
 type InviteRole = 'admin' | 'agent' | 'viewer';
 
@@ -64,9 +63,6 @@ interface CreatedInvite {
   url: string;
   role: InviteRole;
   expiresInDays: number;
-  /** Snapshotted at creation time so a later account rename can't
-   *  retroactively change the wa.me message text on the result step. */
-  accountName: string;
 }
 
 export function InviteMemberDialog({
@@ -76,7 +72,6 @@ export function InviteMemberDialog({
 }: InviteMemberDialogProps) {
   const t = useTranslations('Settings.invite');
   const tRoles = useTranslations('Settings.roles');
-  const { account } = useAuth();
   const [role, setRole] = useState<InviteRole>('agent');
   const [expiry, setExpiry] = useState<string>('7');
   const [label, setLabel] = useState('');
@@ -130,12 +125,6 @@ export function InviteMemberDialog({
         url: data.url,
         role,
         expiresInDays: data.expiresInDays,
-        // Snapshot the account name into the result so the wa.me
-        // share message has team context. Falls back to a generic
-        // string if `account` hasn't loaded yet (shouldn't happen
-        // — the dialog requires admin+ which requires a loaded
-        // profile — but stay safe).
-        accountName: account?.name ?? 'our Matu on Whatsapp account',
       });
       onCreated();
     } catch (err) {
@@ -160,12 +149,7 @@ export function InviteMemberDialog({
   }
 
   function whatsappShareUrl(url: string): string {
-    // Include the account name so the recipient knows which team
-    // they're being invited to before clicking through. This matters
-    // for users in multi-team contexts where "our account"
-    // wouldn't be enough to disambiguate.
-    const accountName = result?.accountName ?? 'our Matu on Whatsapp account';
-    const message = t('whatsappMessage', { accountName, expiresInDays: result?.expiresInDays ?? 0, url });
+    const message = t('whatsappMessage', { expiresInDays: result?.expiresInDays ?? 0, url });
     return `https://wa.me/?text=${encodeURIComponent(message)}`;
   }
 
