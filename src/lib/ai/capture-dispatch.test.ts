@@ -18,6 +18,10 @@ const h = vi.hoisted(() => ({
     // Rows the qualification claim UPDATE returns: non-empty = won.
     claimRows: [] as Record<string, unknown>[],
     claimAttempted: false,
+    existingDeals: [] as Record<string, unknown>[],
+    dealInsert: null as Record<string, unknown> | null,
+    dealInsertError: null as { message: string } | null,
+    stageRow: null as Record<string, unknown> | null,
   },
 }))
 
@@ -71,6 +75,40 @@ vi.mock('./admin-client', () => ({
           },
         }
       }
+      if (table === 'deals') {
+        return {
+          select: () => ({
+            eq: () => ({
+              limit: () =>
+                Promise.resolve({ data: h.state.existingDeals, error: null }),
+            }),
+          }),
+          insert: (payload: Record<string, unknown>) => {
+            h.state.dealInsert = payload
+            return Promise.resolve({ error: h.state.dealInsertError })
+          },
+        }
+      }
+      if (table === 'pipeline_stages') {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({ data: h.state.stageRow, error: null }),
+            }),
+          }),
+        }
+      }
+      if (table === 'accounts') {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({ data: { default_currency: 'INR' }, error: null }),
+            }),
+          }),
+        }
+      }
       if (table === 'custom_fields') {
         const chain = {
           select: () => chain,
@@ -121,6 +159,7 @@ function captureConfig(overrides: Partial<AiConfig> = {}): AiConfig {
     ],
     captureCompleteReply: null,
     agentCategory: null,
+    captureDealStageId: null,
     ...overrides,
   }
 }
@@ -142,6 +181,14 @@ beforeEach(() => {
   h.state.conversationUpdate = null
   h.state.claimRows = [{ id: 'contact-1' }]
   h.state.claimAttempted = false
+  h.state.existingDeals = []
+  h.state.dealInsert = null
+  h.state.dealInsertError = null
+  h.state.stageRow = {
+    id: 'stage-1',
+    pipeline_id: 'pipe-1',
+    pipelines: { id: 'pipe-1', name: 'Govind Enclave', account_id: 'acct-1' },
+  }
   h.engineSendText.mockReset()
   h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'wamid.1' })
   h.loadAiConfig.mockResolvedValue(captureConfig())
@@ -280,6 +327,78 @@ describe('qualification-complete reply', () => {
     h.engineSendText.mockRejectedValue(new Error('meta down'))
     await expect(dispatchLeadCapture(ARGS)).resolves.toBeUndefined()
     // The thread was still handed off before the send attempt.
+    expect(h.state.conversationUpdate).toMatchObject({
+      ai_autoreply_disabled: true,
+    })
+  })
+})
+
+describe('deal on qualification', () => {
+  const REPLY = 'Our team has your details.'
+
+  beforeEach(() => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({ captureCompleteReply: REPLY, captureDealStageId: 'stage-1' }),
+    )
+  })
+
+  it('creates the deal in the configured stage and still sends the reply', async () => {
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealInsert).toMatchObject({
+      account_id: 'acct-1',
+      user_id: 'user-1',
+      pipeline_id: 'pipe-1',
+      stage_id: 'stage-1',
+      contact_id: 'contact-1',
+      conversation_id: 'conv-1',
+      title: 'Lead — Govind Enclave',
+      currency: 'INR',
+      status: 'open',
+    })
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it('puts the captured facts in the deal notes', async () => {
+    // BHK was captured on an earlier pass; only the name fills now.
+    h.state.existingValues = [{ custom_field_id: 'cf-1', value: '3 BHK' }]
+    h.generateReply.mockResolvedValue({ text: '{"name":"Ravi"}', handoff: false })
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealInsert?.notes).toBe('BHK: 3 BHK')
+  })
+
+  it('skips contacts that already have a deal, reply still sent', async () => {
+    h.state.existingDeals = [{ id: 'deal-1' }]
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealInsert).toBeNull()
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it("skips (warns) when the stage isn't this account's", async () => {
+    h.state.stageRow = {
+      id: 'stage-1',
+      pipeline_id: 'pipe-x',
+      pipelines: { id: 'pipe-x', name: 'Other', account_id: 'acct-OTHER' },
+    }
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.dealInsert).toBeNull()
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it('deal-only config creates the deal silently — no send, no AI pause', async () => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({ captureDealStageId: 'stage-1' }),
+    )
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.claimAttempted).toBe(true)
+    expect(h.state.dealInsert).not.toBeNull()
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.conversationUpdate).toBeNull()
+  })
+
+  it('a deals insert failure never blocks the reply', async () => {
+    h.state.dealInsertError = { message: 'RLS says no' }
+    await dispatchLeadCapture(ARGS)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
     expect(h.state.conversationUpdate).toMatchObject({
       ai_autoreply_disabled: true,
     })

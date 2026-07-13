@@ -32,7 +32,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category, capture_deal_stage_id',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -111,6 +111,28 @@ export async function POST(request: Request) {
     const categoryProvided = 'agent_category' in body
     const preset = getAgentPreset(body.agent_category)
     const agentCategory = preset ? preset.id : null
+
+    // Deal-on-qualification stage: non-empty string must be one of this
+    // account's pipeline stages (else deals would land on another
+    // tenant's board); empty/null clears; absent leaves unchanged.
+    const dealStageProvided = 'capture_deal_stage_id' in body
+    const rawDealStage =
+      typeof body.capture_deal_stage_id === 'string'
+        ? body.capture_deal_stage_id.trim()
+        : ''
+    let captureDealStageId: string | null = null
+    if (rawDealStage) {
+      const { data: stageRow } = await supabase
+        .from('pipeline_stages')
+        .select('id, pipelines!inner(account_id)')
+        .eq('id', rawDealStage)
+        .eq('pipelines.account_id', accountId)
+        .maybeSingle()
+      if (!stageRow) {
+        return bad('capture_deal_stage_id must be a pipeline stage of this account')
+      }
+      captureDealStageId = rawDealStage
+    }
 
     let maxPer = Number(body.auto_reply_max_per_conversation)
     if (!Number.isFinite(maxPer)) maxPer = 3
@@ -226,6 +248,7 @@ export async function POST(request: Request) {
           captureFields: [],
           captureCompleteReply: null,
           agentCategory: null,
+          captureDealStageId: null,
         })
       } catch (err) {
         if (err instanceof AiError) {
@@ -272,6 +295,7 @@ export async function POST(request: Request) {
     if (handoffProvided) shared.handoff_agent_id = handoffAgentId
     if (completeReplyProvided) shared.capture_complete_reply = captureCompleteReply
     if (categoryProvided) shared.agent_category = agentCategory
+    if (dealStageProvided) shared.capture_deal_stage_id = captureDealStageId
     if (rawEmbeddingsKey) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
     } else if (clearEmbeddingsKey) {

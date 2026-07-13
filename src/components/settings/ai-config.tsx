@@ -45,6 +45,8 @@ const MASKED_KEY = '••••••••••••••••';
 const HANDOFF_QUEUE = '__queue__';
 // Same for the agent-type picker's "no preset" choice.
 const CATEGORY_CUSTOM = '__custom__';
+// And for the deal-stage picker's "don't create a deal" choice.
+const DEAL_NONE = '__none__';
 
 const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
@@ -87,6 +89,11 @@ export function AiConfig() {
   const [captureCompleteReply, setCaptureCompleteReply] = useState('');
   // '' = custom (no preset).
   const [agentCategory, setAgentCategory] = useState('');
+  // '' = don't create a deal on qualification.
+  const [dealStageId, setDealStageId] = useState('');
+  const [dealStages, setDealStages] = useState<
+    { id: string; label: string }[]
+  >([]);
   const [customFields, setCustomFields] = useState<
     { id: string; field_name: string }[]
   >([]);
@@ -130,6 +137,7 @@ export function AiConfig() {
         );
         setCaptureCompleteReply(data.capture_complete_reply ?? '');
         setAgentCategory(data.agent_category ?? '');
+        setDealStageId(data.capture_deal_stage_id ?? '');
       }
     } catch {
       toast.error(t('loadFailed'));
@@ -158,6 +166,24 @@ export function AiConfig() {
       .select('id, field_name')
       .order('created_at')
       .then(({ data }) => setCustomFields(data ?? []));
+    // Pipeline stages for the "create deal when qualified" picker,
+    // labeled "Pipeline → Stage".
+    supabase
+      .from('pipelines')
+      .select('id, name, pipeline_stages(id, name, position)')
+      .order('created_at')
+      .then(({ data }) => {
+        const options: { id: string; label: string }[] = [];
+        for (const p of data ?? []) {
+          const stages = [...(p.pipeline_stages ?? [])].sort(
+            (a, b) => (a.position ?? 0) - (b.position ?? 0),
+          );
+          for (const s of stages) {
+            options.push({ id: s.id, label: `${p.name} → ${s.name}` });
+          }
+        }
+        setDealStages(options);
+      });
   }, [accountId]);
 
   // Swap the model default when the provider changes, unless the user
@@ -209,6 +235,7 @@ export function AiConfig() {
     capture_fields: captureFields,
     capture_complete_reply: captureCompleteReply.trim() || null,
     agent_category: agentCategory || null,
+    capture_deal_stage_id: dealStageId || null,
     handoff_agent_id: handoffAgentId || null,
   });
 
@@ -304,6 +331,7 @@ export function AiConfig() {
         setHandoffAgentId('');
         setCaptureCompleteReply('');
         setAgentCategory('');
+        setDealStageId('');
       } else {
         const data = await res.json();
         toast.error(data.error ?? t('removeFailed'));
@@ -725,6 +753,35 @@ export function AiConfig() {
                   maxLength={1000}
                   disabled={disabled}
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ai-deal-stage">Create deal when qualified</Label>
+                <p className="text-xs text-muted-foreground">
+                  When every selected field has been collected, add the lead
+                  to your pipeline in this stage. One deal per contact —
+                  contacts that already have a deal are skipped.
+                </p>
+                <Select
+                  value={dealStageId || DEAL_NONE}
+                  onValueChange={(v) =>
+                    setDealStageId(!v || v === DEAL_NONE ? '' : v)
+                  }
+                  disabled={disabled}
+                >
+                  <SelectTrigger id="ai-deal-stage">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEAL_NONE}>
+                      Don&apos;t create a deal
+                    </SelectItem>
+                    {dealStages.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </CardContent>
           )}

@@ -77,6 +77,7 @@ export async function POST(request: Request) {
         captureFields: [],
         captureCompleteReply: null,
         agentCategory: null,
+        captureDealStageId: null,
       })
     } catch (err) {
       if (err instanceof AiError) {

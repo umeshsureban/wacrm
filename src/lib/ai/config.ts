@@ -16,10 +16,11 @@ interface AiConfigRow {
   capture_fields: unknown
   capture_complete_reply: string | null
   agent_category: string | null
+  capture_deal_stage_id: string | null
 }
 
 const CONFIG_COLUMNS =
-  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category'
+  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category, capture_deal_stage_id'
 
 const CAPTURE_BUILTIN_KEYS = new Set(['name', 'email', 'company'])
 const MAX_CAPTURE_FIELDS = 20
@@ -118,6 +119,7 @@ export async function loadAiConfig(
         ? row.capture_complete_reply.trim()
         : null,
     agentCategory: row.agent_category ?? null,
+    captureDealStageId: row.capture_deal_stage_id ?? null,
   }
 }
 

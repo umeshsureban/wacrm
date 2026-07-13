@@ -42,6 +42,9 @@ export interface AiConfig {
   /** Sent once when capture fills the last empty target field; the
    *  conversation is then paused + handed off. Null = feature off. */
   captureCompleteReply: string | null
+  /** Stage a deal is created in when the lead qualifies (the stage
+   *  implies the pipeline). Null = don't create deals. */
+  captureDealStageId: string | null
   /** Preset the config was created from ('real_estate', …); null =
    *  hand-built. Informational — behaviour lives in the columns above. */
   agentCategory: string | null
