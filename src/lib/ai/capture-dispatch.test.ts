@@ -6,12 +6,18 @@ const h = vi.hoisted(() => ({
   loadAiConfig: vi.fn(),
   buildConversationContext: vi.fn(),
   generateReply: vi.fn(),
+  engineSendText: vi.fn(),
   state: {
     contact: null as Record<string, unknown> | null,
     customFieldDefs: [] as Record<string, unknown>[],
     existingValues: [] as Record<string, unknown>[],
     contactUpdate: null as Record<string, unknown> | null,
     upsertRows: null as Record<string, unknown>[] | null,
+    conversation: null as Record<string, unknown> | null,
+    conversationUpdate: null as Record<string, unknown> | null,
+    // Rows the qualification claim UPDATE returns: non-empty = won.
+    claimRows: [] as Record<string, unknown>[],
+    claimAttempted: false,
   },
 }))
 
@@ -21,6 +27,7 @@ vi.mock('./config', async (importOriginal) => ({
 }))
 vi.mock('./context', () => ({ buildConversationContext: h.buildConversationContext }))
 vi.mock('./generate', () => ({ generateReply: h.generateReply }))
+vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -33,7 +40,33 @@ vi.mock('./admin-client', () => ({
             }),
           }),
           update: (payload: Record<string, unknown>) => {
+            // The qualification-complete claim vs. the field write.
+            if ('ai_qualified_at' in payload) {
+              h.state.claimAttempted = true
+              return {
+                eq: () => ({
+                  is: () => ({
+                    select: () =>
+                      Promise.resolve({ data: h.state.claimRows, error: null }),
+                  }),
+                }),
+              }
+            }
             h.state.contactUpdate = payload
+            return { eq: () => Promise.resolve({ error: null }) }
+          },
+        }
+      }
+      if (table === 'conversations') {
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({ data: h.state.conversation, error: null }),
+            }),
+          }),
+          update: (payload: Record<string, unknown>) => {
+            h.state.conversationUpdate = payload
             return { eq: () => Promise.resolve({ error: null }) }
           },
         }
@@ -63,7 +96,12 @@ vi.mock('./admin-client', () => ({
 
 import { dispatchLeadCapture } from './capture'
 
-const ARGS = { accountId: 'acct-1', conversationId: 'conv-1', contactId: 'contact-1' }
+const ARGS = {
+  accountId: 'acct-1',
+  conversationId: 'conv-1',
+  contactId: 'contact-1',
+  configOwnerUserId: 'user-1',
+}
 
 function captureConfig(overrides: Partial<AiConfig> = {}): AiConfig {
   return {
@@ -81,6 +119,8 @@ function captureConfig(overrides: Partial<AiConfig> = {}): AiConfig {
       { kind: 'builtin', key: 'name' },
       { kind: 'custom', id: 'cf-1' },
     ],
+    captureCompleteReply: null,
+    agentCategory: null,
     ...overrides,
   }
 }
@@ -98,6 +138,12 @@ beforeEach(() => {
   h.state.existingValues = []
   h.state.contactUpdate = null
   h.state.upsertRows = null
+  h.state.conversation = { assigned_agent_id: null }
+  h.state.conversationUpdate = null
+  h.state.claimRows = [{ id: 'contact-1' }]
+  h.state.claimAttempted = false
+  h.engineSendText.mockReset()
+  h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'wamid.1' })
   h.loadAiConfig.mockResolvedValue(captureConfig())
   h.buildConversationContext.mockResolvedValue([
     { role: 'user', content: 'I am Ravi, want 3 BHK' },
@@ -150,5 +196,92 @@ describe('dispatchLeadCapture', () => {
   it('never throws when the provider errors', async () => {
     h.generateReply.mockRejectedValue(new Error('provider down'))
     await expect(dispatchLeadCapture(ARGS)).resolves.toBeUndefined()
+  })
+})
+
+describe('qualification-complete reply', () => {
+  const REPLY = 'Our team has your details — we will reach out shortly.'
+
+  beforeEach(() => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({ captureCompleteReply: REPLY }),
+    )
+    // Default extraction fills BOTH targets (name + BHK) → transition.
+  })
+
+  it('sends once, pauses the AI, and leaves a handoff note when the last field fills', async () => {
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.claimAttempted).toBe(true)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+    expect(h.engineSendText).toHaveBeenCalledWith({
+      accountId: 'acct-1',
+      userId: 'user-1',
+      conversationId: 'conv-1',
+      contactId: 'contact-1',
+      text: REPLY,
+      aiGenerated: false,
+    })
+    expect(h.state.conversationUpdate).toMatchObject({
+      ai_autoreply_disabled: true,
+    })
+    expect(h.state.conversationUpdate).not.toHaveProperty('assigned_agent_id')
+  })
+
+  it('assigns the configured handoff agent when the thread is unowned', async () => {
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({ captureCompleteReply: REPLY, handoffAgentId: 'agent-7' }),
+    )
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.conversationUpdate).toMatchObject({
+      ai_autoreply_disabled: true,
+      assigned_agent_id: 'agent-7',
+    })
+  })
+
+  it('does not fire while target fields remain empty', async () => {
+    // Model finds only the name; the custom field stays empty.
+    h.generateReply.mockResolvedValue({ text: '{"name":"Ravi"}', handoff: false })
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.claimAttempted).toBe(false)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.conversationUpdate).toBeNull()
+  })
+
+  it('does nothing when no completion reply is configured', async () => {
+    h.loadAiConfig.mockResolvedValue(captureConfig())
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.claimAttempted).toBe(false)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('never double-sends when the claim was already taken', async () => {
+    h.state.claimRows = [] // another inbound won the race
+    await dispatchLeadCapture(ARGS)
+    expect(h.state.claimAttempted).toBe(true)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.conversationUpdate).toBeNull()
+  })
+
+  it('skips the send but still pauses the AI when a human owns the thread', async () => {
+    h.state.conversation = { assigned_agent_id: 'human-1' }
+    h.loadAiConfig.mockResolvedValue(
+      captureConfig({ captureCompleteReply: REPLY, handoffAgentId: 'agent-7' }),
+    )
+    await dispatchLeadCapture(ARGS)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.conversationUpdate).toMatchObject({
+      ai_autoreply_disabled: true,
+    })
+    // Never stomps the existing human assignment.
+    expect(h.state.conversationUpdate).not.toHaveProperty('assigned_agent_id')
+  })
+
+  it('stays silent (no throw) when the send fails after the claim', async () => {
+    h.engineSendText.mockRejectedValue(new Error('meta down'))
+    await expect(dispatchLeadCapture(ARGS)).resolves.toBeUndefined()
+    // The thread was still handed off before the send attempt.
+    expect(h.state.conversationUpdate).toMatchObject({
+      ai_autoreply_disabled: true,
+    })
   })
 })

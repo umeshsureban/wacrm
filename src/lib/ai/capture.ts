@@ -1,8 +1,10 @@
-import type { CaptureBuiltinKey } from './types'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import type { AiConfig, CaptureBuiltinKey } from './types'
 import { supabaseAdmin } from './admin-client'
 import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
 import { generateReply } from './generate'
+import { engineSendText } from '@/lib/flows/meta-send'
 
 // ============================================================
 // AI lead capture — extract customer-stated facts into contact
@@ -104,6 +106,10 @@ interface DispatchCaptureArgs {
   accountId: string
   conversationId: string
   contactId: string
+  /** The account's WhatsApp config owner — audit columns on the
+   *  qualification-complete send (same role as in the auto-reply
+   *  dispatch). */
+  configOwnerUserId: string
 }
 
 /**
@@ -118,7 +124,7 @@ interface DispatchCaptureArgs {
  * made at all, so a fully-qualified lead costs nothing per message.
  */
 export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<void> {
-  const { accountId, conversationId, contactId } = args
+  const { accountId, conversationId, contactId, configOwnerUserId } = args
 
   try {
     const db = supabaseAdmin()
@@ -228,7 +234,92 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         .from('contact_custom_values')
         .upsert(customRows, { onConflict: 'contact_id,custom_field_id' })
     }
+
+    // ---- Qualification-complete reply ----
+    // Fires only on the transition: this pass had empty targets and the
+    // extraction just filled every one of them. Contacts that were fully
+    // qualified before the feature shipped never trip this (they exit at
+    // the `emptyTargets.length === 0` early-return above).
+    const remaining = emptyTargets.filter((t) => !values[t.jsonKey])
+    if (remaining.length === 0 && config.captureCompleteReply) {
+      await sendQualificationCompleteReply(db, {
+        accountId,
+        conversationId,
+        contactId,
+        configOwnerUserId,
+        config,
+      })
+    }
   } catch (err) {
     console.error('[ai lead-capture] dispatch failed:', err)
   }
+}
+
+/**
+ * Send the account's "we have your details" acknowledgment once, then
+ * pause the AI on this conversation and hand it to the team — the
+ * message promises a human follow-up, so the bot must stop talking.
+ *
+ * Order matters for failure safety: claim → pause/handoff → send. If
+ * the send throws after the claim, the thread is already routed to a
+ * human who sees the qualified lead — we under-message rather than
+ * risk the bot carrying on after promising a callback.
+ */
+async function sendQualificationCompleteReply(
+  db: SupabaseClient,
+  args: {
+    accountId: string
+    conversationId: string
+    contactId: string
+    configOwnerUserId: string
+    config: AiConfig
+  },
+): Promise<void> {
+  const { accountId, conversationId, contactId, configOwnerUserId, config } = args
+
+  // Atomic send-once claim: only the winner of a concurrent-inbound race
+  // gets rows back. The flag lives on the contact — qualification is a
+  // property of the lead, not of one conversation.
+  const { data: claimed, error: claimErr } = await db
+    .from('contacts')
+    .update({ ai_qualified_at: new Date().toISOString() })
+    .eq('id', contactId)
+    .is('ai_qualified_at', null)
+    .select('id')
+  if (claimErr) {
+    console.error('[ai lead-capture] qualification claim failed:', claimErr)
+    return
+  }
+  if (!claimed || claimed.length === 0) return // already sent / lost the race
+
+  const { data: conv } = await db
+    .from('conversations')
+    .select('assigned_agent_id')
+    .eq('id', conversationId)
+    .maybeSingle()
+  const assignedAgentId = conv?.assigned_agent_id ?? null
+
+  // Pause + handoff, mirroring the auto-reply handoff block: sticky
+  // until re-enabled, never stomps an existing human assignment.
+  const update: Record<string, unknown> = {
+    ai_autoreply_disabled: true,
+    ai_handoff_summary: '🤖 Lead qualified — all capture fields collected.',
+  }
+  if (config.handoffAgentId && !assignedAgentId) {
+    update.assigned_agent_id = config.handoffAgentId
+  }
+  await db.from('conversations').update(update).eq('id', conversationId)
+
+  // A human already owning the thread makes the canned "we'll reach
+  // out" ack noise — skip the send, keep the pause.
+  if (assignedAgentId) return
+
+  await engineSendText({
+    accountId,
+    userId: configOwnerUserId,
+    conversationId,
+    contactId,
+    text: config.captureCompleteReply!,
+    aiGenerated: false,
+  })
 }

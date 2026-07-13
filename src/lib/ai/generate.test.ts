@@ -15,6 +15,8 @@ function config(overrides: Partial<AiConfig> = {}): AiConfig {
     embeddingsApiKey: null,
     captureEnabled: false,
     captureFields: [],
+    captureCompleteReply: null,
+    agentCategory: null,
     ...overrides,
   }
 }

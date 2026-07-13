@@ -820,6 +820,7 @@ async function processMessage(
       accountId,
       conversationId: conversation.id,
       contactId: contactRecord.id,
+      configOwnerUserId,
     })
   }
 

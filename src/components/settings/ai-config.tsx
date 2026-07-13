@@ -32,6 +32,7 @@ import {
   AI_PROVIDER_DEFAULT_MODEL,
   AI_PROVIDER_MODEL_OPTIONS,
 } from '@/lib/ai/defaults';
+import { AGENT_PRESETS, getAgentPreset } from '@/lib/ai/agent-presets';
 import type { AiProvider, CaptureFieldTarget } from '@/lib/ai/types';
 import type { AccountMember } from '@/types';
 import { fetchAccountMembers, memberLabel } from '@/lib/account/members';
@@ -42,6 +43,8 @@ const MASKED_KEY = '••••••••••••••••';
 // Radix Select can't use an empty-string item value, so the "leave
 // unassigned" choice gets a sentinel that maps to null in the payload.
 const HANDOFF_QUEUE = '__queue__';
+// Same for the agent-type picker's "no preset" choice.
+const CATEGORY_CUSTOM = '__custom__';
 
 const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
@@ -81,6 +84,9 @@ export function AiConfig() {
   const [maxPerConversation, setMaxPerConversation] = useState(3);
   const [captureEnabled, setCaptureEnabled] = useState(false);
   const [captureFields, setCaptureFields] = useState<CaptureFieldTarget[]>([]);
+  const [captureCompleteReply, setCaptureCompleteReply] = useState('');
+  // '' = custom (no preset).
+  const [agentCategory, setAgentCategory] = useState('');
   const [customFields, setCustomFields] = useState<
     { id: string; field_name: string }[]
   >([]);
@@ -122,6 +128,8 @@ export function AiConfig() {
         setCaptureFields(
           Array.isArray(data.capture_fields) ? data.capture_fields : [],
         );
+        setCaptureCompleteReply(data.capture_complete_reply ?? '');
+        setAgentCategory(data.agent_category ?? '');
       }
     } catch {
       toast.error(t('loadFailed'));
@@ -199,8 +207,34 @@ export function AiConfig() {
     auto_reply_max_per_conversation: maxPerConversation,
     capture_enabled: captureEnabled,
     capture_fields: captureFields,
+    capture_complete_reply: captureCompleteReply.trim() || null,
+    agent_category: agentCategory || null,
     handoff_agent_id: handoffAgentId || null,
   });
+
+  // Prefill the form from a preset. Custom capture fields are matched/
+  // created server-side on save (the route sees the category change),
+  // so here we only set what the form owns directly.
+  const handleCategoryChange = (next: string) => {
+    const preset = getAgentPreset(next);
+    if (!preset) {
+      setAgentCategory('');
+      return;
+    }
+    if (
+      (systemPrompt.trim() || captureCompleteReply.trim()) &&
+      !window.confirm(
+        `Applying the "${preset.name}" template will replace your current prompt and completion message. Continue?`,
+      )
+    ) {
+      return;
+    }
+    setAgentCategory(preset.id);
+    setSystemPrompt(preset.systemPrompt);
+    setCaptureCompleteReply(preset.completionReply);
+    setCaptureEnabled(true);
+    setCaptureFields(preset.captureBuiltins.map((key) => ({ kind: 'builtin', key })));
+  };
 
   const handleTest = async () => {
     setTesting(true);
@@ -268,6 +302,8 @@ export function AiConfig() {
         setAutoReplyEnabled(false);
         setSystemPrompt('');
         setHandoffAgentId('');
+        setCaptureCompleteReply('');
+        setAgentCategory('');
       } else {
         const data = await res.json();
         toast.error(data.error ?? t('removeFailed'));
@@ -469,6 +505,41 @@ export function AiConfig() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
+              <Label htmlFor="ai-category">Agent type</Label>
+              <p className="text-xs text-muted-foreground">
+                Start from a ready-made template — it prefills the prompt,
+                lead-capture fields and completion message. Everything stays
+                editable.
+              </p>
+              <Select
+                value={agentCategory || CATEGORY_CUSTOM}
+                onValueChange={(v) =>
+                  handleCategoryChange(!v || v === CATEGORY_CUSTOM ? '' : v)
+                }
+                disabled={disabled}
+              >
+                <SelectTrigger id="ai-category">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={CATEGORY_CUSTOM}>Custom</SelectItem>
+                  {AGENT_PRESETS.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {agentCategory && (
+                <p className="text-xs text-muted-foreground">
+                  {getAgentPreset(agentCategory)?.description} Missing custom
+                  fields (e.g. Budget, Configuration) are created when you
+                  save.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
               <Label htmlFor="ai-prompt">{t('businessContext')}</Label>
               <Textarea
                 id="ai-prompt"
@@ -632,6 +703,28 @@ export function AiConfig() {
                     ))}
                   </div>
                 )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ai-complete-reply">
+                  Completion message{' '}
+                  <span className="font-normal text-muted-foreground">
+                    (optional)
+                  </span>
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Sent once when every selected field has been collected. The
+                  AI then stops replying on that conversation and hands it to
+                  your team. Leave empty to disable.
+                </p>
+                <Textarea
+                  id="ai-complete-reply"
+                  value={captureCompleteReply}
+                  onChange={(e) => setCaptureCompleteReply(e.target.value)}
+                  placeholder="Hi! Our team has your details and will reach out to you shortly."
+                  rows={3}
+                  maxLength={1000}
+                  disabled={disabled}
+                />
               </div>
             </CardContent>
           )}

@@ -75,6 +75,8 @@ export async function POST(request: Request) {
         embeddingsApiKey: null,
         captureEnabled: false,
         captureFields: [],
+        captureCompleteReply: null,
+        agentCategory: null,
       })
     } catch (err) {
       if (err instanceof AiError) {

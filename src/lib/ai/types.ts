@@ -39,6 +39,12 @@ export interface AiConfig {
   /** Lead capture: extract customer-stated facts into contact fields. */
   captureEnabled: boolean
   captureFields: CaptureFieldTarget[]
+  /** Sent once when capture fills the last empty target field; the
+   *  conversation is then paused + handed off. Null = feature off. */
+  captureCompleteReply: string | null
+  /** Preset the config was created from ('real_estate', …); null =
+   *  hand-built. Informational — behaviour lives in the columns above. */
+  agentCategory: string | null
 }
 
 /** A single conversation turn in the shape both providers accept. */
