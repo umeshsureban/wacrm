@@ -45,6 +45,8 @@ const MASKED_KEY = '••••••••••••••••';
 const HANDOFF_QUEUE = '__queue__';
 // Same for the agent-type picker's "no preset" choice.
 const CATEGORY_CUSTOM = '__custom__';
+// And for the deal-stage picker's "don't create a deal" choice.
+const DEAL_NONE = '__none__';
 
 const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
@@ -87,6 +89,14 @@ export function AiConfig() {
   const [captureCompleteReply, setCaptureCompleteReply] = useState('');
   // '' = custom (no preset).
   const [agentCategory, setAgentCategory] = useState('');
+  // '' = don't create a deal on qualification.
+  const [dealStageId, setDealStageId] = useState('');
+  const [dealStages, setDealStages] = useState<
+    { id: string; label: string }[]
+  >([]);
+  // Visit-booked auto-move: '' = off.
+  const [visitFieldId, setVisitFieldId] = useState('');
+  const [visitStageId, setVisitStageId] = useState('');
   const [customFields, setCustomFields] = useState<
     { id: string; field_name: string }[]
   >([]);
@@ -130,6 +140,9 @@ export function AiConfig() {
         );
         setCaptureCompleteReply(data.capture_complete_reply ?? '');
         setAgentCategory(data.agent_category ?? '');
+        setDealStageId(data.capture_deal_stage_id ?? '');
+        setVisitFieldId(data.capture_visit_field_id ?? '');
+        setVisitStageId(data.capture_visit_stage_id ?? '');
       }
     } catch {
       toast.error(t('loadFailed'));
@@ -158,6 +171,24 @@ export function AiConfig() {
       .select('id, field_name')
       .order('created_at')
       .then(({ data }) => setCustomFields(data ?? []));
+    // Pipeline stages for the "create deal when qualified" picker,
+    // labeled "Pipeline → Stage".
+    supabase
+      .from('pipelines')
+      .select('id, name, pipeline_stages(id, name, position)')
+      .order('created_at')
+      .then(({ data }) => {
+        const options: { id: string; label: string }[] = [];
+        for (const p of data ?? []) {
+          const stages = [...(p.pipeline_stages ?? [])].sort(
+            (a, b) => (a.position ?? 0) - (b.position ?? 0),
+          );
+          for (const s of stages) {
+            options.push({ id: s.id, label: `${p.name} → ${s.name}` });
+          }
+        }
+        setDealStages(options);
+      });
   }, [accountId]);
 
   // Swap the model default when the provider changes, unless the user
@@ -189,6 +220,34 @@ export function AiConfig() {
         ? prev.filter((f) => !sameTarget(f, t))
         : [...prev, t],
     );
+  const captureIsOptional = (t: CaptureFieldTarget) =>
+    captureFields.find((f) => sameTarget(f, t))?.optional === true;
+  const toggleOptional = (t: CaptureFieldTarget) =>
+    setCaptureFields((prev) =>
+      prev.map((f) => (sameTarget(f, t) ? { ...f, optional: !f.optional } : f)),
+    );
+
+  // Small required/optional pill next to a selected capture field.
+  const OptionalPill = ({ target }: { target: CaptureFieldTarget }) =>
+    captureHas(target) ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!disabled) toggleOptional(target);
+        }}
+        className={
+          'rounded-full border px-1.5 py-0 text-[10px] leading-4 ' +
+          (captureIsOptional(target)
+            ? 'border-border text-muted-foreground'
+            : 'border-primary/40 text-primary')
+        }
+        title="Optional fields are captured when mentioned but never delay the completion message or deal."
+      >
+        {captureIsOptional(target) ? 'optional' : 'required'}
+      </button>
+    ) : null;
 
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
 
@@ -209,6 +268,9 @@ export function AiConfig() {
     capture_fields: captureFields,
     capture_complete_reply: captureCompleteReply.trim() || null,
     agent_category: agentCategory || null,
+    capture_deal_stage_id: dealStageId || null,
+    capture_visit_field_id: visitFieldId || null,
+    capture_visit_stage_id: visitStageId || null,
     handoff_agent_id: handoffAgentId || null,
   });
 
@@ -233,7 +295,13 @@ export function AiConfig() {
     setSystemPrompt(preset.systemPrompt);
     setCaptureCompleteReply(preset.completionReply);
     setCaptureEnabled(true);
-    setCaptureFields(preset.captureBuiltins.map((key) => ({ kind: 'builtin', key })));
+    setCaptureFields(
+      preset.captureBuiltins.map((b) => ({
+        kind: 'builtin' as const,
+        key: b.key,
+        ...(b.optional && { optional: true }),
+      })),
+    );
   };
 
   const handleTest = async () => {
@@ -304,6 +372,9 @@ export function AiConfig() {
         setHandoffAgentId('');
         setCaptureCompleteReply('');
         setAgentCategory('');
+        setDealStageId('');
+        setVisitFieldId('');
+        setVisitStageId('');
       } else {
         const data = await res.json();
         toast.error(data.error ?? t('removeFailed'));
@@ -672,6 +743,7 @@ export function AiConfig() {
                         disabled={disabled}
                       />
                       {key}
+                      <OptionalPill target={{ kind: 'builtin', key }} />
                     </label>
                   ))}
                 </div>
@@ -699,6 +771,7 @@ export function AiConfig() {
                           disabled={disabled}
                         />
                         {cf.field_name}
+                        <OptionalPill target={{ kind: 'custom', id: cf.id }} />
                       </label>
                     ))}
                   </div>
@@ -725,6 +798,84 @@ export function AiConfig() {
                   maxLength={1000}
                   disabled={disabled}
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ai-deal-stage">Create deal when qualified</Label>
+                <p className="text-xs text-muted-foreground">
+                  When every selected field has been collected, add the lead
+                  to your pipeline in this stage. One deal per contact —
+                  contacts that already have a deal are skipped.
+                </p>
+                <Select
+                  value={dealStageId || DEAL_NONE}
+                  onValueChange={(v) =>
+                    setDealStageId(!v || v === DEAL_NONE ? '' : v)
+                  }
+                  disabled={disabled}
+                >
+                  <SelectTrigger id="ai-deal-stage">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={DEAL_NONE}>
+                      Don&apos;t create a deal
+                    </SelectItem>
+                    {dealStages.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Move deal when a visit is booked</Label>
+                <p className="text-xs text-muted-foreground">
+                  Pick the custom field that holds the agreed visit slot
+                  (mark it optional above). Whenever the AI captures it —
+                  even after handoff — the contact&apos;s open deal moves to
+                  the chosen stage.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Select
+                    value={visitFieldId || DEAL_NONE}
+                    onValueChange={(v) =>
+                      setVisitFieldId(!v || v === DEAL_NONE ? '' : v)
+                    }
+                    disabled={disabled}
+                  >
+                    <SelectTrigger aria-label="Visit slot field">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={DEAL_NONE}>No visit field</SelectItem>
+                      {customFields.map((cf) => (
+                        <SelectItem key={cf.id} value={cf.id}>
+                          {cf.field_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={visitStageId || DEAL_NONE}
+                    onValueChange={(v) =>
+                      setVisitStageId(!v || v === DEAL_NONE ? '' : v)
+                    }
+                    disabled={disabled || !visitFieldId}
+                  >
+                    <SelectTrigger aria-label="Move to stage">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={DEAL_NONE}>Don&apos;t move</SelectItem>
+                      {dealStages.map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          {s.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </CardContent>
           )}

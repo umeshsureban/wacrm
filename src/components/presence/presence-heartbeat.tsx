@@ -59,9 +59,13 @@ export function PresenceHeartbeat() {
       const { error } = await supabase.rpc("touch_presence", {
         p_status: currentStatus(),
       });
-      if (error && !cancelled) {
-        // Non-fatal: presence is best-effort. Log once per failure so a
-        // misconfigured RPC is visible without spamming.
+      // Non-fatal: presence is best-effort. A network-level failure (page
+      // navigating away mid-beat, tab waking from sleep, brief Wi-Fi drop)
+      // surfaces here as "TypeError: Failed to fetch" rather than a real
+      // Postgres error — it's expected noise, not actionable, and self-heals
+      // on the next tick, so it's swallowed. A genuine RPC error (bad args,
+      // permissions, missing function) is still logged so it stays visible.
+      if (error && !cancelled && !error.message.includes("Failed to fetch")) {
         console.error("[PresenceHeartbeat] touch_presence failed:", error.message);
       }
     };

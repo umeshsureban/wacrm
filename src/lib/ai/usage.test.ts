@@ -32,6 +32,21 @@ describe('logAiUsage', () => {
     })
   })
 
+  it('accepts the lead_capture mode', async () => {
+    const { db, insert } = fakeDb()
+    await logAiUsage(db, {
+      accountId: 'acct-1',
+      conversationId: 'conv-1',
+      mode: 'lead_capture',
+      provider: 'google',
+      model: 'gemma-4-31b-it',
+      usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12 },
+    })
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'lead_capture', provider: 'google' }),
+    )
+  })
+
   it('is a no-op when the provider reported no usage', async () => {
     const { db, from } = fakeDb()
     await logAiUsage(db, {

@@ -8,6 +8,7 @@ const nameTarget: ResolvedTarget = {
   label: 'name',
   fieldType: 'text',
   options: [],
+  optional: false,
 }
 const bhkTarget: ResolvedTarget = {
   jsonKey: 'BHK',
@@ -16,6 +17,7 @@ const bhkTarget: ResolvedTarget = {
   label: 'BHK',
   fieldType: 'select',
   options: ['2 BHK', '3 BHK'],
+  optional: false,
 }
 
 describe('buildCapturePrompt', () => {

@@ -21,7 +21,8 @@ export interface AgentPreset {
   name: string
   description: string
   systemPrompt: string
-  captureBuiltins: CaptureBuiltinKey[]
+  /** `optional: true` = captured when mentioned, never gates completion. */
+  captureBuiltins: { key: CaptureBuiltinKey; optional?: boolean }[]
   captureCustomFields: PresetCustomField[]
   completionReply: string
 }
@@ -35,10 +36,11 @@ const REAL_ESTATE: AgentPreset = {
     'You are a warm, professional home advisor for a real-estate business, chatting with prospective buyers on WhatsApp.',
     'Your job is to qualify the lead: learn their name, email, budget, preferred configuration (e.g. 1/2/3 BHK), preferred location, and when they would like to visit.',
     'Ask for at most ONE missing detail per message, woven naturally into the conversation — never send a list of questions or an interrogation.',
+    'At a natural moment, ask once for their email address (e.g. to send the brochure); if they decline or ignore it, move on and never insist.',
     'Answer questions about the property only from the business context and knowledge base below; never invent prices, availability, amenities, or offers.',
     'Keep replies short and friendly, suitable for WhatsApp, and reply in the language the customer writes in.',
   ].join(' '),
-  captureBuiltins: ['name', 'email'],
+  captureBuiltins: [{ key: 'name' }, { key: 'email', optional: true }],
   captureCustomFields: [
     { name: 'Budget', type: 'text' },
     {
@@ -76,9 +78,10 @@ export async function applyPresetCaptureFields(
   userId: string,
   preset: AgentPreset,
 ): Promise<CaptureFieldTarget[]> {
-  const targets: CaptureFieldTarget[] = preset.captureBuiltins.map((key) => ({
+  const targets: CaptureFieldTarget[] = preset.captureBuiltins.map((b) => ({
     kind: 'builtin',
-    key,
+    key: b.key,
+    ...(b.optional && { optional: true }),
   }))
 
   // Fetch all of the account's fields and match case-insensitively in

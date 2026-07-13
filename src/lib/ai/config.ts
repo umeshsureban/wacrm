@@ -16,10 +16,13 @@ interface AiConfigRow {
   capture_fields: unknown
   capture_complete_reply: string | null
   agent_category: string | null
+  capture_deal_stage_id: string | null
+  capture_visit_field_id: string | null
+  capture_visit_stage_id: string | null
 }
 
 const CONFIG_COLUMNS =
-  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category'
+  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category, capture_deal_stage_id, capture_visit_field_id, capture_visit_stage_id'
 
 const CAPTURE_BUILTIN_KEYS = new Set(['name', 'email', 'company'])
 const MAX_CAPTURE_FIELDS = 20
@@ -36,14 +39,15 @@ export function sanitizeCaptureFields(raw: unknown): CaptureFieldTarget[] {
     if (out.length >= MAX_CAPTURE_FIELDS) break
     if (!item || typeof item !== 'object') continue
     const o = item as Record<string, unknown>
+    const optional = o.optional === true
     if (
       o.kind === 'builtin' &&
       typeof o.key === 'string' &&
       CAPTURE_BUILTIN_KEYS.has(o.key)
     ) {
-      out.push({ kind: 'builtin', key: o.key as CaptureBuiltinKey })
+      out.push({ kind: 'builtin', key: o.key as CaptureBuiltinKey, ...(optional && { optional }) })
     } else if (o.kind === 'custom' && typeof o.id === 'string' && o.id) {
-      out.push({ kind: 'custom', id: o.id })
+      out.push({ kind: 'custom', id: o.id, ...(optional && { optional }) })
     }
   }
   return out
@@ -118,6 +122,9 @@ export async function loadAiConfig(
         ? row.capture_complete_reply.trim()
         : null,
     agentCategory: row.agent_category ?? null,
+    captureDealStageId: row.capture_deal_stage_id ?? null,
+    captureVisitFieldId: row.capture_visit_field_id ?? null,
+    captureVisitStageId: row.capture_visit_stage_id ?? null,
   }
 }
 

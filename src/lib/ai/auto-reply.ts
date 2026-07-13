@@ -118,12 +118,14 @@ export async function dispatchInboundToAiReply(
       messages,
     })
 
-    // Record token spend on the account's BYO key. Fire-and-forget so it
-    // never adds latency to the customer-facing send: `logAiUsage`
-    // swallows its own errors, so the floating promise can't reject.
-    // Logged regardless of handoff — the provider call happened either
-    // way.
-    void logAiUsage(db, {
+    // Record token spend on the account's BYO key. Awaited — we run
+    // inside the webhook's `after()` block, which only keeps the
+    // function alive for promises it can see; a detached promise gets
+    // frozen before the insert lands (this was why the Usage tab stayed
+    // empty). `logAiUsage` swallows its own errors, so awaiting can't
+    // fail the reply. Logged regardless of handoff — the provider call
+    // happened either way.
+    await logAiUsage(db, {
       accountId,
       conversationId,
       mode: 'auto_reply',

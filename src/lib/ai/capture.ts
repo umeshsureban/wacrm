@@ -5,6 +5,7 @@ import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
 import { generateReply } from './generate'
 import { engineSendText } from '@/lib/flows/meta-send'
+import { logAiUsage } from './usage'
 
 // ============================================================
 // AI lead capture — extract customer-stated facts into contact
@@ -21,6 +22,9 @@ export interface ResolvedTarget {
   label: string
   fieldType: string
   options: string[]
+  /** Optional fields are extracted when mentioned but never gate the
+   *  qualification-complete reply/deal. */
+  optional: boolean
 }
 
 const BUILTIN_DESCRIPTION: Record<CaptureBuiltinKey, string> = {
@@ -134,11 +138,13 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
 
     // ---- Resolve targets and find which are still empty ----
     const builtinTargets = config.captureFields.filter(
-      (f): f is { kind: 'builtin'; key: CaptureBuiltinKey } => f.kind === 'builtin',
+      (f): f is { kind: 'builtin'; key: CaptureBuiltinKey; optional?: boolean } =>
+        f.kind === 'builtin',
     )
     const customTargets = config.captureFields.filter(
-      (f): f is { kind: 'custom'; id: string } => f.kind === 'custom',
+      (f): f is { kind: 'custom'; id: string; optional?: boolean } => f.kind === 'custom',
     )
+    const customOptional = new Map(customTargets.map((t) => [t.id, t.optional === true]))
 
     const { data: contact, error: contactErr } = await db
       .from('contacts')
@@ -160,6 +166,7 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         label: t.key,
         fieldType: 'text',
         options: [],
+        optional: t.optional === true,
       })
       usedKeys.add(t.key)
     }
@@ -196,6 +203,7 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
           label: String(def.field_name),
           fieldType: String(def.field_type ?? 'text'),
           options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
+          optional: customOptional.get(def.id) === true,
         })
       }
     }
@@ -206,11 +214,25 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
     const messages = await buildConversationContext(db, conversationId)
     if (messages.length === 0) return
 
-    const { text } = await generateReply({
+    const { text, usage } = await generateReply({
       config,
       systemPrompt: buildCapturePrompt(emptyTargets),
       messages,
     })
+
+    // Record token spend — capture runs on every inbound with empty
+    // fields, so it's real money on the account's BYO key. Awaited
+    // (detached promises get frozen in the webhook's `after()` block);
+    // `logAiUsage` swallows its own errors.
+    await logAiUsage(db, {
+      accountId,
+      conversationId,
+      mode: 'lead_capture',
+      provider: config.provider,
+      model: config.model,
+      usage,
+    })
+
     const values = parseCaptureJson(text)
     if (Object.keys(values).length === 0) return
 
@@ -235,14 +257,21 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         .upsert(customRows, { onConflict: 'contact_id,custom_field_id' })
     }
 
-    // ---- Qualification-complete reply ----
-    // Fires only on the transition: this pass had empty targets and the
-    // extraction just filled every one of them. Contacts that were fully
-    // qualified before the feature shipped never trip this (they exit at
-    // the `emptyTargets.length === 0` early-return above).
-    const remaining = emptyTargets.filter((t) => !values[t.jsonKey])
-    if (remaining.length === 0 && config.captureCompleteReply) {
-      await sendQualificationCompleteReply(db, {
+    // ---- Qualification complete ----
+    // Fires only on the transition: this pass had empty REQUIRED targets
+    // and the extraction just filled the last of them. Optional fields
+    // (email, visit slot, …) keep capturing but never gate this.
+    // Contacts fully qualified before the feature shipped never trip it
+    // (they exit at the `emptyTargets.length === 0` early-return above,
+    // and the ai_qualified_at claim guards the rest).
+    const remaining = emptyTargets.filter((t) => !t.optional && !values[t.jsonKey])
+    const requiredWereMissing = emptyTargets.some((t) => !t.optional)
+    if (
+      requiredWereMissing &&
+      remaining.length === 0 &&
+      (config.captureCompleteReply || config.captureDealStageId)
+    ) {
+      await handleQualificationComplete(db, {
         accountId,
         conversationId,
         contactId,
@@ -250,22 +279,46 @@ export async function dispatchLeadCapture(args: DispatchCaptureArgs): Promise<vo
         config,
       })
     }
+
+    // ---- Site visit booked ----
+    // Runs after the completion block so a deal created this very pass
+    // is moved too. Fires whenever capture fills the configured visit
+    // field — including after handoff, from the customer's own words.
+    if (config.captureVisitFieldId && config.captureVisitStageId) {
+      const visitRow = customRows.find(
+        (r) => r.custom_field_id === config.captureVisitFieldId,
+      )
+      if (visitRow) {
+        try {
+          await moveDealOnVisitBooked(db, {
+            accountId,
+            contactId,
+            config,
+            slot: visitRow.value,
+          })
+        } catch (err) {
+          console.error('[ai lead-capture] visit-stage move failed:', err)
+        }
+      }
+    }
   } catch (err) {
     console.error('[ai lead-capture] dispatch failed:', err)
   }
 }
 
 /**
- * Send the account's "we have your details" acknowledgment once, then
- * pause the AI on this conversation and hand it to the team — the
+ * The lead just became fully qualified: create its pipeline deal (when
+ * a target stage is configured), then send the account's "we have your
+ * details" acknowledgment and pause the AI on this conversation — the
  * message promises a human follow-up, so the bot must stop talking.
  *
- * Order matters for failure safety: claim → pause/handoff → send. If
- * the send throws after the claim, the thread is already routed to a
- * human who sees the qualified lead — we under-message rather than
- * risk the bot carrying on after promising a callback.
+ * Order matters for failure safety: claim → deal → pause/handoff →
+ * send. The deal is best-effort (its failure never blocks the reply),
+ * and if the send throws after the claim, the thread is already routed
+ * to a human who sees the qualified lead — we under-message rather
+ * than risk the bot carrying on after promising a callback.
  */
-async function sendQualificationCompleteReply(
+async function handleQualificationComplete(
   db: SupabaseClient,
   args: {
     accountId: string
@@ -277,7 +330,7 @@ async function sendQualificationCompleteReply(
 ): Promise<void> {
   const { accountId, conversationId, contactId, configOwnerUserId, config } = args
 
-  // Atomic send-once claim: only the winner of a concurrent-inbound race
+  // Atomic once-only claim: only the winner of a concurrent-inbound race
   // gets rows back. The flag lives on the contact — qualification is a
   // property of the lead, not of one conversation.
   const { data: claimed, error: claimErr } = await db
@@ -290,7 +343,19 @@ async function sendQualificationCompleteReply(
     console.error('[ai lead-capture] qualification claim failed:', claimErr)
     return
   }
-  if (!claimed || claimed.length === 0) return // already sent / lost the race
+  if (!claimed || claimed.length === 0) return // already handled / lost the race
+
+  if (config.captureDealStageId) {
+    try {
+      await createQualificationDeal(db, args)
+    } catch (err) {
+      // Best-effort: a broken pipeline config must not cost the
+      // customer their acknowledgment message.
+      console.error('[ai lead-capture] deal creation failed:', err)
+    }
+  }
+
+  if (!config.captureCompleteReply) return // deal-only config: stay silent
 
   const { data: conv } = await db
     .from('conversations')
@@ -319,7 +384,194 @@ async function sendQualificationCompleteReply(
     userId: configOwnerUserId,
     conversationId,
     contactId,
-    text: config.captureCompleteReply!,
+    text: config.captureCompleteReply,
     aiGenerated: false,
   })
+}
+
+/**
+ * One deal per contact, in the configured stage, titled
+ * "{name or phone} — {pipeline}" with the captured facts as notes.
+ * Mirrors the automations engine's `create_deal` step (currency from
+ * the account default) minus the LLM lead-scoring the old external
+ * qualifier did — the team drags cards onward from the landing stage.
+ */
+async function createQualificationDeal(
+  db: SupabaseClient,
+  args: {
+    accountId: string
+    conversationId: string
+    contactId: string
+    configOwnerUserId: string
+    config: AiConfig
+  },
+): Promise<void> {
+  const { accountId, conversationId, contactId, configOwnerUserId, config } = args
+
+  // Skip contacts that already have a deal (e.g. created manually or by
+  // an automation) — never duplicate a card on the board.
+  const { data: existingDeals } = await db
+    .from('deals')
+    .select('id')
+    .eq('contact_id', contactId)
+    .limit(1)
+  if (existingDeals && existingDeals.length > 0) return
+
+  // Resolve the stage → pipeline, scoped to the account (a stale id
+  // after a pipeline was deleted/rebuilt just warns and skips).
+  const { data: stage } = await db
+    .from('pipeline_stages')
+    .select('id, pipeline_id, pipelines!inner(id, name, account_id)')
+    .eq('id', config.captureDealStageId!)
+    .maybeSingle()
+  const pipeline = stage?.pipelines as
+    | { id: string; name: string; account_id: string }
+    | null
+    | undefined
+  if (!stage || !pipeline || pipeline.account_id !== accountId) {
+    console.warn(
+      `[ai lead-capture] configured deal stage ${config.captureDealStageId} not found for account ${accountId} — skipping deal.`,
+    )
+    return
+  }
+
+  const { data: contact } = await db
+    .from('contacts')
+    .select('name, phone')
+    .eq('id', contactId)
+    .maybeSingle()
+  const who = contact?.name?.trim() || contact?.phone || 'Lead'
+
+  const { data: acct } = await db
+    .from('accounts')
+    .select('default_currency')
+    .eq('id', accountId)
+    .maybeSingle()
+
+  const notes = await buildDealNotes(db, accountId, contactId, config)
+
+  const { error: insErr } = await db.from('deals').insert({
+    account_id: accountId,
+    user_id: configOwnerUserId,
+    pipeline_id: pipeline.id,
+    stage_id: stage.id,
+    contact_id: contactId,
+    conversation_id: conversationId,
+    title: `${who} — ${pipeline.name}`,
+    value: 0,
+    currency: acct?.default_currency ?? 'USD',
+    notes,
+    status: 'open',
+  })
+  if (insErr) throw insErr
+}
+
+/**
+ * The customer just agreed a site-visit slot: move their open deal to
+ * the configured stage and stamp the slot into the deal notes. Only
+ * moves an existing deal — if none exists yet (visit volunteered
+ * before qualification), the deal will be created at qualification
+ * with the slot already in its notes via `buildDealNotes`.
+ */
+async function moveDealOnVisitBooked(
+  db: SupabaseClient,
+  args: {
+    accountId: string
+    contactId: string
+    config: AiConfig
+    slot: string
+  },
+): Promise<void> {
+  const { accountId, contactId, config, slot } = args
+
+  // Stage must still belong to this account (same guard as creation).
+  const { data: stage } = await db
+    .from('pipeline_stages')
+    .select('id, pipelines!inner(account_id)')
+    .eq('id', config.captureVisitStageId!)
+    .maybeSingle()
+  const pipeline = stage?.pipelines as { account_id: string } | null | undefined
+  if (!stage || !pipeline || pipeline.account_id !== accountId) {
+    console.warn(
+      `[ai lead-capture] configured visit stage ${config.captureVisitStageId} not found for account ${accountId} — skipping move.`,
+    )
+    return
+  }
+
+  const { data: deals } = await db
+    .from('deals')
+    .select('id, notes, stage_id')
+    .eq('contact_id', contactId)
+    .eq('status', 'open')
+    .order('created_at', { ascending: false })
+    .limit(1)
+  const deal = deals?.[0]
+  if (!deal) return // nothing on the board yet
+
+  const line = `Site visit: ${slot}`
+  const notes =
+    deal.notes && String(deal.notes).includes(line)
+      ? deal.notes
+      : deal.notes
+        ? `${deal.notes}\n${line}`
+        : line
+
+  await db
+    .from('deals')
+    .update({ stage_id: stage.id, notes, updated_at: new Date().toISOString() })
+    .eq('id', deal.id)
+}
+
+/**
+ * "Label: value" lines for every configured capture target that has a
+ * value — the whole qualification picture, not just the final pass.
+ * Best-effort: any lookup miss just yields fewer lines.
+ */
+async function buildDealNotes(
+  db: SupabaseClient,
+  accountId: string,
+  contactId: string,
+  config: AiConfig,
+): Promise<string | null> {
+  const lines: string[] = []
+
+  const builtinKeys = config.captureFields
+    .filter((f): f is { kind: 'builtin'; key: CaptureBuiltinKey } => f.kind === 'builtin')
+    .map((f) => f.key)
+  if (builtinKeys.length > 0) {
+    const { data: contact } = await db
+      .from('contacts')
+      .select('name, email, company')
+      .eq('id', contactId)
+      .maybeSingle()
+    for (const key of builtinKeys) {
+      const value = (contact as Record<string, unknown> | null)?.[key]
+      if (typeof value === 'string' && value.trim()) lines.push(`${key}: ${value.trim()}`)
+    }
+  }
+
+  const customIds = config.captureFields
+    .filter((f): f is { kind: 'custom'; id: string } => f.kind === 'custom')
+    .map((f) => f.id)
+  if (customIds.length > 0) {
+    const { data: defs } = await db
+      .from('custom_fields')
+      .select('id, field_name')
+      .eq('account_id', accountId)
+      .in('id', customIds)
+    const { data: vals } = await db
+      .from('contact_custom_values')
+      .select('custom_field_id, value')
+      .eq('contact_id', contactId)
+      .in('custom_field_id', customIds)
+    const byId = new Map((vals ?? []).map((v) => [v.custom_field_id, v.value]))
+    for (const def of defs ?? []) {
+      const value = byId.get(def.id)
+      if (typeof value === 'string' && value.trim()) {
+        lines.push(`${def.field_name}: ${value.trim()}`)
+      }
+    }
+  }
+
+  return lines.length > 0 ? lines.join('\n') : null
 }

@@ -60,7 +60,11 @@ describe('applyPresetCaptureFields', () => {
       field_name: 'Budget',
     })
     expect(targets.slice(0, PRESET.captureBuiltins.length)).toEqual(
-      PRESET.captureBuiltins.map((key) => ({ kind: 'builtin', key })),
+      PRESET.captureBuiltins.map((b) => ({
+        kind: 'builtin',
+        key: b.key,
+        ...(b.optional && { optional: true }),
+      })),
     )
     expect(targets).toHaveLength(
       PRESET.captureBuiltins.length + PRESET.captureCustomFields.length,

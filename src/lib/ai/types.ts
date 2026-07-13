@@ -10,10 +10,12 @@ export type AiProvider = 'openai' | 'anthropic' | 'google'
 
 export type CaptureBuiltinKey = 'name' | 'email' | 'company'
 
-/** One field the AI should fill on the contact (lead capture). */
+/** One field the AI should fill on the contact (lead capture).
+ *  `optional: true` = extract it when the customer mentions it, but
+ *  never gate the qualification-complete reply/deal on it. */
 export type CaptureFieldTarget =
-  | { kind: 'builtin'; key: CaptureBuiltinKey }
-  | { kind: 'custom'; id: string }
+  | { kind: 'builtin'; key: CaptureBuiltinKey; optional?: boolean }
+  | { kind: 'custom'; id: string; optional?: boolean }
 
 /**
  * Account AI setup, decrypted and ready to use. Produced by
@@ -42,6 +44,14 @@ export interface AiConfig {
   /** Sent once when capture fills the last empty target field; the
    *  conversation is then paused + handed off. Null = feature off. */
   captureCompleteReply: string | null
+  /** Stage a deal is created in when the lead qualifies (the stage
+   *  implies the pipeline). Null = don't create deals. */
+  captureDealStageId: string | null
+  /** Custom field holding the agreed site-visit slot; when capture
+   *  fills it, the contact's open deal moves to `captureVisitStageId`.
+   *  Both null = feature off. */
+  captureVisitFieldId: string | null
+  captureVisitStageId: string | null
   /** Preset the config was created from ('real_estate', …); null =
    *  hand-built. Informational — behaviour lives in the columns above. */
   agentCategory: string | null

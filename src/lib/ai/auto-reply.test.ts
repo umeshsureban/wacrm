@@ -81,6 +81,9 @@ function aiConfig(overrides: Partial<AiConfig> = {}): AiConfig {
     captureFields: [],
     captureCompleteReply: null,
     agentCategory: null,
+    captureDealStageId: null,
+    captureVisitFieldId: null,
+    captureVisitStageId: null,
     ...overrides,
   }
 }
