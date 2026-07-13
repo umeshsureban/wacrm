@@ -1,20 +1,53 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { decrypt } from '@/lib/whatsapp/encryption'
-import type { AiConfig } from './types'
+import type { AiConfig, CaptureBuiltinKey, CaptureFieldTarget } from './types'
 
 interface AiConfigRow {
-  provider: 'openai' | 'anthropic'
+  provider: 'openai' | 'anthropic' | 'google'
   model: string
   api_key: string
   system_prompt: string | null
   is_active: boolean
   auto_reply_enabled: boolean
   auto_reply_max_per_conversation: number
+  handoff_agent_id: string | null
   embeddings_api_key: string | null
+  capture_enabled: boolean | null
+  capture_fields: unknown
+  capture_complete_reply: string | null
+  agent_category: string | null
 }
 
 const CONFIG_COLUMNS =
-  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, embeddings_api_key'
+  'provider, model, api_key, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category'
+
+const CAPTURE_BUILTIN_KEYS = new Set(['name', 'email', 'company'])
+const MAX_CAPTURE_FIELDS = 20
+
+/**
+ * Validate a stored/submitted capture_fields payload into typed
+ * targets, silently dropping anything malformed. Shared by config
+ * loading (jsonb column) and the config POST route (request body).
+ */
+export function sanitizeCaptureFields(raw: unknown): CaptureFieldTarget[] {
+  if (!Array.isArray(raw)) return []
+  const out: CaptureFieldTarget[] = []
+  for (const item of raw) {
+    if (out.length >= MAX_CAPTURE_FIELDS) break
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    if (
+      o.kind === 'builtin' &&
+      typeof o.key === 'string' &&
+      CAPTURE_BUILTIN_KEYS.has(o.key)
+    ) {
+      out.push({ kind: 'builtin', key: o.key as CaptureBuiltinKey })
+    } else if (o.kind === 'custom' && typeof o.id === 'string' && o.id) {
+      out.push({ kind: 'custom', id: o.id })
+    }
+  }
+  return out
+}
 
 /**
  * Load and decrypt the account's AI config for *use* (draft or
@@ -76,7 +109,15 @@ export async function loadAiConfig(
     isActive: row.is_active,
     autoReplyEnabled: row.auto_reply_enabled,
     autoReplyMaxPerConversation: row.auto_reply_max_per_conversation,
+    handoffAgentId: row.handoff_agent_id,
     embeddingsApiKey,
+    captureEnabled: row.capture_enabled === true,
+    captureFields: sanitizeCaptureFields(row.capture_fields),
+    captureCompleteReply:
+      typeof row.capture_complete_reply === 'string' && row.capture_complete_reply.trim()
+        ? row.capture_complete_reply.trim()
+        : null,
+    agentCategory: row.agent_category ?? null,
   }
 }
 

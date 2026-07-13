@@ -8,7 +8,9 @@ import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import { validateAiCredentials } from '@/lib/ai/validate'
 import { embedTexts } from '@/lib/ai/embeddings'
-import { AiError, type AiProvider } from '@/lib/ai/types'
+import { sanitizeCaptureFields } from '@/lib/ai/config'
+import { applyPresetCaptureFields, getAgentPreset } from '@/lib/ai/agent-presets'
+import { AiError, type AiProvider, type CaptureFieldTarget } from '@/lib/ai/types'
 
 function bad(message: string) {
   return NextResponse.json({ error: message }, { status: 400 })
@@ -30,7 +32,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, api_key, embeddings_api_key',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, capture_enabled, capture_fields, capture_complete_reply, agent_category',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -46,11 +48,12 @@ export async function GET() {
     if (!data) return NextResponse.json({ configured: false })
     // The keys are selected only to derive the has_* flags; neither is
     // returned to the client.
-    const { api_key, embeddings_api_key, ...safe } = data
+    const { api_key, embeddings_api_key, capture_fields, ...safe } = data
     return NextResponse.json({
       configured: true,
       has_key: !!api_key,
       has_embeddings_key: !!embeddings_api_key,
+      capture_fields: sanitizeCaptureFields(capture_fields),
       ...safe,
     })
   } catch (err) {
@@ -78,8 +81,8 @@ export async function POST(request: Request) {
     if (!body || typeof body !== 'object') return bad('Invalid request body')
 
     const provider = body.provider as AiProvider
-    if (provider !== 'openai' && provider !== 'anthropic') {
-      return bad('provider must be "openai" or "anthropic"')
+    if (provider !== 'openai' && provider !== 'anthropic' && provider !== 'google') {
+      return bad('provider must be "openai", "anthropic" or "google"')
     }
     const model = typeof body.model === 'string' ? body.model.trim() : ''
     if (!model) return bad('model is required')
@@ -90,10 +93,47 @@ export async function POST(request: Request) {
         : null
     const isActive = body.is_active === true
     const autoReplyEnabled = body.auto_reply_enabled === true
+    const captureEnabled = body.capture_enabled === true
+    let captureFields = sanitizeCaptureFields(body.capture_fields)
+
+    // Qualification-complete reply: non-empty string sets it, empty/null
+    // clears it, absent leaves it unchanged (same contract as the
+    // handoff target below).
+    const completeReplyProvided = 'capture_complete_reply' in body
+    const captureCompleteReply =
+      typeof body.capture_complete_reply === 'string' && body.capture_complete_reply.trim()
+        ? body.capture_complete_reply.trim().slice(0, 1000)
+        : null
+
+    // Agent category: a known preset id or null (custom). Unknown ids
+    // are treated as custom rather than rejected — presets may be
+    // removed in future versions.
+    const categoryProvided = 'agent_category' in body
+    const preset = getAgentPreset(body.agent_category)
+    const agentCategory = preset ? preset.id : null
 
     let maxPer = Number(body.auto_reply_max_per_conversation)
     if (!Number.isFinite(maxPer)) maxPer = 3
     maxPer = Math.min(20, Math.max(1, Math.floor(maxPer)))
+
+    // Handoff routing target for auto-reply. A non-empty string must be a
+    // member of this account (else the conversation would be assigned to a
+    // stranger); an empty string / null means "leave unassigned" (the
+    // shared queue). Absent → left unchanged on update below.
+    const rawHandoff =
+      typeof body.handoff_agent_id === 'string' ? body.handoff_agent_id.trim() : ''
+    const handoffProvided = 'handoff_agent_id' in body
+    let handoffAgentId: string | null = null
+    if (rawHandoff) {
+      const { data: member } = await supabase
+        .from('profiles')
+        .select('user_id')
+        .eq('account_id', accountId)
+        .eq('user_id', rawHandoff)
+        .maybeSingle()
+      if (!member) return bad('handoff_agent_id must be a member of this account')
+      handoffAgentId = rawHandoff
+    }
 
     const rawKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
 
@@ -109,9 +149,43 @@ export async function POST(request: Request) {
     // Reuse the stored key when the form didn't send a fresh one.
     const { data: existing } = await supabase
       .from('ai_configs')
-      .select('id, provider, model, api_key')
+      .select('id, provider, model, api_key, agent_category')
       .eq('account_id', accountId)
       .maybeSingle()
+
+    // Applying a preset (fresh pick or switching category) materializes
+    // its capture fields: custom fields are matched by name / created
+    // for the account, and the preset's targets are merged ahead of
+    // whatever the form sent. Saves that keep the same category don't
+    // re-force fields the admin has since deselected.
+    if (preset && existing?.agent_category !== preset.id) {
+      try {
+        const presetFields = await applyPresetCaptureFields(
+          supabase,
+          accountId,
+          userId,
+          preset,
+        )
+        const seen = new Set(
+          presetFields.map((t) => (t.kind === 'builtin' ? `b:${t.key}` : `c:${t.id}`)),
+        )
+        const merged: CaptureFieldTarget[] = [...presetFields]
+        for (const t of captureFields) {
+          const key = t.kind === 'builtin' ? `b:${t.key}` : `c:${t.id}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            merged.push(t)
+          }
+        }
+        captureFields = sanitizeCaptureFields(merged) // re-cap at the max
+      } catch (err) {
+        console.error('[ai/config POST] preset apply failed:', err)
+        return NextResponse.json(
+          { error: 'Failed to create the preset’s custom fields' },
+          { status: 500 },
+        )
+      }
+    }
 
     let apiKeyPlain: string
     if (rawKey) {
@@ -146,7 +220,12 @@ export async function POST(request: Request) {
           isActive,
           autoReplyEnabled,
           autoReplyMaxPerConversation: maxPer,
+          handoffAgentId: null,
           embeddingsApiKey: null,
+          captureEnabled: false,
+          captureFields: [],
+          captureCompleteReply: null,
+          agentCategory: null,
         })
       } catch (err) {
         if (err instanceof AiError) {
@@ -185,7 +264,14 @@ export async function POST(request: Request) {
       is_active: isActive,
       auto_reply_enabled: autoReplyEnabled,
       auto_reply_max_per_conversation: maxPer,
+      capture_enabled: captureEnabled,
+      capture_fields: captureFields,
     }
+    // Only touch the handoff target when the form actually sent the field,
+    // so a partial save (e.g. flipping a toggle) doesn't wipe it.
+    if (handoffProvided) shared.handoff_agent_id = handoffAgentId
+    if (completeReplyProvided) shared.capture_complete_reply = captureCompleteReply
+    if (categoryProvided) shared.agent_category = agentCategory
     if (rawEmbeddingsKey) {
       shared.embeddings_api_key = encrypt(rawEmbeddingsKey)
     } else if (clearEmbeddingsKey) {

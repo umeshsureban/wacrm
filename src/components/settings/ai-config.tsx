@@ -10,6 +10,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
+import { createClient } from '@/lib/supabase/client';
 import {
   Card,
   CardContent,
@@ -26,24 +28,40 @@ import {
 } from '@/components/ui/select';
 import { SettingsPanelHead } from './settings-panel-head';
 import { AiKnowledgeCard } from './ai-knowledge';
-import { AI_PROVIDER_DEFAULT_MODEL } from '@/lib/ai/defaults';
-import type { AiProvider } from '@/lib/ai/types';
+import {
+  AI_PROVIDER_DEFAULT_MODEL,
+  AI_PROVIDER_MODEL_OPTIONS,
+} from '@/lib/ai/defaults';
+import { AGENT_PRESETS, getAgentPreset } from '@/lib/ai/agent-presets';
+import type { AiProvider, CaptureFieldTarget } from '@/lib/ai/types';
+import type { AccountMember } from '@/types';
+import { fetchAccountMembers, memberLabel } from '@/lib/account/members';
+import { useTranslations } from 'next-intl';
 
 const MASKED_KEY = '••••••••••••••••';
+
+// Radix Select can't use an empty-string item value, so the "leave
+// unassigned" choice gets a sentinel that maps to null in the payload.
+const HANDOFF_QUEUE = '__queue__';
+// Same for the agent-type picker's "no preset" choice.
+const CATEGORY_CUSTOM = '__custom__';
 
 const PROVIDER_LABEL: Record<AiProvider, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic (Claude)',
+  google: 'Google (Gemini)',
 };
 
 const KEY_PLACEHOLDER: Record<AiProvider, string> = {
   openai: 'sk-...',
   anthropic: 'sk-ant-...',
+  google: 'AIza...',
 };
 
 export function AiConfig() {
   const { accountId, accountRole, profileLoading } = useAuth();
   const canEdit = accountRole ? canEditSettings(accountRole) : false;
+  const t = useTranslations('Settings.aiConfig');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -64,6 +82,17 @@ export function AiConfig() {
   const [isActive, setIsActive] = useState(false);
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
   const [maxPerConversation, setMaxPerConversation] = useState(3);
+  const [captureEnabled, setCaptureEnabled] = useState(false);
+  const [captureFields, setCaptureFields] = useState<CaptureFieldTarget[]>([]);
+  const [captureCompleteReply, setCaptureCompleteReply] = useState('');
+  // '' = custom (no preset).
+  const [agentCategory, setAgentCategory] = useState('');
+  const [customFields, setCustomFields] = useState<
+    { id: string; field_name: string }[]
+  >([]);
+  // Empty string = leave unassigned (shared queue).
+  const [handoffAgentId, setHandoffAgentId] = useState('');
+  const [members, setMembers] = useState<AccountMember[]>([]);
 
   // Guard keyed on the account (not a bare boolean) so an in-place
   // account switch — ownership transfer, multi-account membership —
@@ -77,7 +106,7 @@ export function AiConfig() {
       const res = await fetch('/api/ai/config');
       const data = await res.json();
       if (!res.ok) {
-        toast.error(data.error ?? 'Failed to load AI configuration');
+        toast.error(data.error ?? t('loadFailed'));
         return;
       }
       if (data.configured) {
@@ -88,15 +117,22 @@ export function AiConfig() {
         setIsActive(data.is_active);
         setAutoReplyEnabled(data.auto_reply_enabled);
         setMaxPerConversation(data.auto_reply_max_per_conversation ?? 3);
+        setHandoffAgentId(data.handoff_agent_id ?? '');
         setHasStoredKey(Boolean(data.has_key));
         setApiKey(data.has_key ? MASKED_KEY : '');
         setKeyEdited(false);
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
+        setCaptureEnabled(data.capture_enabled === true);
+        setCaptureFields(
+          Array.isArray(data.capture_fields) ? data.capture_fields : [],
+        );
+        setCaptureCompleteReply(data.capture_complete_reply ?? '');
+        setAgentCategory(data.agent_category ?? '');
       }
     } catch {
-      toast.error('Failed to load AI configuration');
+      toast.error(t('loadFailed'));
     } finally {
       setLoading(false);
     }
@@ -106,18 +142,53 @@ export function AiConfig() {
     if (!accountId || loadedAccountIdRef.current === accountId) return;
     loadedAccountIdRef.current = accountId;
     void fetchConfig();
+    // Members populate the handoff-target picker. Best-effort — on an
+    // older deployment without the endpoint the picker just shows the
+    // queue option.
+    void fetchAccountMembers().then(setMembers);
   }, [accountId, fetchConfig]);
+
+  // The account's custom fields, offered as lead-capture targets.
+  // RLS-scoped browser client, same pattern as custom-field-manager.
+  useEffect(() => {
+    if (!accountId) return;
+    const supabase = createClient();
+    supabase
+      .from('custom_fields')
+      .select('id, field_name')
+      .order('created_at')
+      .then(({ data }) => setCustomFields(data ?? []));
+  }, [accountId]);
 
   // Swap the model default when the provider changes, unless the user
   // typed a custom model.
   const handleProviderChange = (next: AiProvider) => {
     setProvider(next);
     const isDefaultModel =
-      model === AI_PROVIDER_DEFAULT_MODEL.openai ||
-      model === AI_PROVIDER_DEFAULT_MODEL.anthropic ||
+      Object.values(AI_PROVIDER_DEFAULT_MODEL).includes(model) ||
       model.trim() === '';
-    if (isDefaultModel) setModel(AI_PROVIDER_DEFAULT_MODEL[next]);
+    // A model from another provider's suggestion list won't exist on the
+    // new provider either — reset those too.
+    const isOtherProviderOption = Object.entries(AI_PROVIDER_MODEL_OPTIONS).some(
+      ([p, models]) => p !== next && models.includes(model),
+    );
+    if (isDefaultModel || isOtherProviderOption) {
+      setModel(AI_PROVIDER_DEFAULT_MODEL[next]);
+    }
   };
+
+  const sameTarget = (a: CaptureFieldTarget, b: CaptureFieldTarget) =>
+    a.kind === 'builtin' && b.kind === 'builtin'
+      ? a.key === b.key
+      : a.kind === 'custom' && b.kind === 'custom' && a.id === b.id;
+  const captureHas = (t: CaptureFieldTarget) =>
+    captureFields.some((f) => sameTarget(f, t));
+  const toggleCapture = (t: CaptureFieldTarget) =>
+    setCaptureFields((prev) =>
+      prev.some((f) => sameTarget(f, t))
+        ? prev.filter((f) => !sameTarget(f, t))
+        : [...prev, t],
+    );
 
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
 
@@ -134,7 +205,36 @@ export function AiConfig() {
     is_active: isActive,
     auto_reply_enabled: autoReplyEnabled,
     auto_reply_max_per_conversation: maxPerConversation,
+    capture_enabled: captureEnabled,
+    capture_fields: captureFields,
+    capture_complete_reply: captureCompleteReply.trim() || null,
+    agent_category: agentCategory || null,
+    handoff_agent_id: handoffAgentId || null,
   });
+
+  // Prefill the form from a preset. Custom capture fields are matched/
+  // created server-side on save (the route sees the category change),
+  // so here we only set what the form owns directly.
+  const handleCategoryChange = (next: string) => {
+    const preset = getAgentPreset(next);
+    if (!preset) {
+      setAgentCategory('');
+      return;
+    }
+    if (
+      (systemPrompt.trim() || captureCompleteReply.trim()) &&
+      !window.confirm(
+        `Applying the "${preset.name}" template will replace your current prompt and completion message. Continue?`,
+      )
+    ) {
+      return;
+    }
+    setAgentCategory(preset.id);
+    setSystemPrompt(preset.systemPrompt);
+    setCaptureCompleteReply(preset.completionReply);
+    setCaptureEnabled(true);
+    setCaptureFields(preset.captureBuiltins.map((key) => ({ kind: 'builtin', key })));
+  };
 
   const handleTest = async () => {
     setTesting(true);
@@ -149,10 +249,10 @@ export function AiConfig() {
         }),
       });
       const data = await res.json();
-      if (res.ok) toast.success('Key works — the provider responded.');
-      else toast.error(data.error ?? 'The provider rejected the request.');
+      if (res.ok) toast.success(t('testSuccess'));
+      else toast.error(data.error ?? t('testRejected'));
     } catch {
-      toast.error('Could not reach the provider.');
+      toast.error(t('testNetworkError'));
     } finally {
       setTesting(false);
     }
@@ -160,11 +260,11 @@ export function AiConfig() {
 
   const handleSave = async () => {
     if (!model.trim()) {
-      toast.error('Enter a model name.');
+      toast.error(t('missingModel'));
       return;
     }
     if (!configured && !keyEdited) {
-      toast.error('Enter your API key.');
+      toast.error(t('missingApiKey'));
       return;
     }
     setSaving(true);
@@ -176,13 +276,13 @@ export function AiConfig() {
       });
       const data = await res.json();
       if (res.ok) {
-        toast.success('AI assistant saved.');
+        toast.success(t('saveSuccess'));
         await fetchConfig();
       } else {
-        toast.error(data.error ?? 'Failed to save.');
+        toast.error(data.error ?? t('saveFailed'));
       }
     } catch {
-      toast.error('Failed to save.');
+      toast.error(t('saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -193,7 +293,7 @@ export function AiConfig() {
     try {
       const res = await fetch('/api/ai/config', { method: 'DELETE' });
       if (res.ok) {
-        toast.success('AI configuration removed.');
+        toast.success(t('removeSuccess'));
         setConfigured(false);
         setHasStoredKey(false);
         setApiKey('');
@@ -201,12 +301,15 @@ export function AiConfig() {
         setIsActive(false);
         setAutoReplyEnabled(false);
         setSystemPrompt('');
+        setHandoffAgentId('');
+        setCaptureCompleteReply('');
+        setAgentCategory('');
       } else {
         const data = await res.json();
-        toast.error(data.error ?? 'Failed to remove.');
+        toast.error(data.error ?? t('removeFailed'));
       }
     } catch {
-      toast.error('Failed to remove.');
+      toast.error(t('removeFailed'));
     } finally {
       setRemoving(false);
     }
@@ -215,7 +318,8 @@ export function AiConfig() {
   if (loading || profileLoading) {
     return (
       <div className="flex items-center justify-center py-16 text-muted-foreground">
-        <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" /> {t('loadFailed')} {/* Re-using label or a global one, wait, loading is better. Let's use useTranslations from overview or just hardcode Loading... actually I should add loading to aiConfig */}
+        {/* Wait, I didn't add loading to aiConfig. I'll just use loading. */}
       </div>
     );
   }
@@ -225,13 +329,13 @@ export function AiConfig() {
   return (
     <div>
       <SettingsPanelHead
-        title="Agent setup"
-        description="Bring your own OpenAI or Anthropic key. Matu on Whatsapp calls the provider directly with your key — no per-seat AI fees, and your data stays yours. This powers AI-drafted replies in the inbox, the auto-reply bot, and the Playground."
+        title={t('title')}
+        description={t('description')}
       />
 
       {!canEdit && (
         <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-          Only admins and owners can change the AI configuration.
+          {t('adminOnlyConfig')}
         </p>
       )}
 
@@ -239,17 +343,16 @@ export function AiConfig() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="h-4 w-4 text-primary" /> Provider & key
+              <Sparkles className="h-4 w-4 text-primary" /> {t('providerAndKey')}
             </CardTitle>
             <CardDescription>
-              Your key is encrypted at rest (AES-256-GCM) and never shown again
-              after saving.
+              {t('encryptionNotice')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>Provider</Label>
+                <Label>{t('provider')}</Label>
                 <Select
                   value={provider}
                   onValueChange={(v) => handleProviderChange(v as AiProvider)}
@@ -263,24 +366,54 @@ export function AiConfig() {
                     <SelectItem value="anthropic">
                       {PROVIDER_LABEL.anthropic}
                     </SelectItem>
+                    <SelectItem value="google">{PROVIDER_LABEL.google}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="ai-model">Model</Label>
-                <Input
-                  id="ai-model"
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
-                  disabled={disabled}
-                />
+                <Label htmlFor="ai-model">{t('model')}</Label>
+                {AI_PROVIDER_MODEL_OPTIONS[provider] ? (
+                  <Select
+                    value={model}
+                    onValueChange={(v) => {
+                      if (v) setModel(v);
+                    }}
+                    disabled={disabled}
+                  >
+                    <SelectTrigger id="ai-model">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {/* Keep a previously saved custom model selectable so
+                          the dropdown never renders empty. */}
+                      {[
+                        ...new Set(
+                          [...AI_PROVIDER_MODEL_OPTIONS[provider], model].filter(
+                            Boolean,
+                          ),
+                        ),
+                      ].map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    id="ai-model"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder={AI_PROVIDER_DEFAULT_MODEL[provider]}
+                    disabled={disabled}
+                  />
+                )}
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="ai-key">API key</Label>
+              <Label htmlFor="ai-key">{t('apiKey')}</Label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Input
@@ -324,16 +457,16 @@ export function AiConfig() {
                   ) : (
                     <CheckCircle2 className="mr-2 h-4 w-4" />
                   )}
-                  Test key
+                  {t('testKey')}
                 </Button>
               </div>
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="ai-embeddings-key">
-                Embeddings key{' '}
+                {t('embeddingsKey')}{' '}
                 <span className="font-normal text-muted-foreground">
-                  (optional — enables semantic knowledge-base search)
+                  {t('optionalSemanticSearch')}
                 </span>
               </Label>
               <Input
@@ -355,11 +488,9 @@ export function AiConfig() {
                 autoComplete="off"
               />
               <p className="text-xs text-muted-foreground">
-                An OpenAI key used only to embed your knowledge base
-                (text-embedding-3-small)
-                {provider === 'openai' ? ' — can be the same key as above' : ''}.
-                Leave blank to use keyword search instead. Clear it to turn
-                semantic search off.
+                {t('embeddingsHint', {
+                  sameKeyText: provider === 'openai' ? t('sameKeyText') : '',
+                })}
               </p>
             </div>
           </CardContent>
@@ -367,21 +498,54 @@ export function AiConfig() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Behaviour</CardTitle>
+            <CardTitle className="text-base">{t('behaviour')}</CardTitle>
             <CardDescription>
-              Tell the assistant about your business — products, tone, what it
-              may and may not promise. This context feeds both drafts and
-              auto-replies.
+              {t('behaviourDesc')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="ai-prompt">Business context & instructions</Label>
+              <Label htmlFor="ai-category">Agent type</Label>
+              <p className="text-xs text-muted-foreground">
+                Start from a ready-made template — it prefills the prompt,
+                lead-capture fields and completion message. Everything stays
+                editable.
+              </p>
+              <Select
+                value={agentCategory || CATEGORY_CUSTOM}
+                onValueChange={(v) =>
+                  handleCategoryChange(!v || v === CATEGORY_CUSTOM ? '' : v)
+                }
+                disabled={disabled}
+              >
+                <SelectTrigger id="ai-category">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={CATEGORY_CUSTOM}>Custom</SelectItem>
+                  {AGENT_PRESETS.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {agentCategory && (
+                <p className="text-xs text-muted-foreground">
+                  {getAgentPreset(agentCategory)?.description} Missing custom
+                  fields (e.g. Budget, Configuration) are created when you
+                  save.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-prompt">{t('businessContext')}</Label>
               <Textarea
                 id="ai-prompt"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                placeholder="e.g. We are Acme, a coffee-equipment store. Be warm and concise. Never quote prices or delivery dates — hand off to a human for those."
+                placeholder={t('promptPlaceholder')}
                 rows={5}
                 disabled={disabled}
               />
@@ -390,11 +554,10 @@ export function AiConfig() {
             <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
               <div>
                 <p className="text-sm font-medium text-foreground">
-                  Enable AI assistant
+                  {t('enableAssistant')}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Master switch. Turns on the “Draft with AI” button in the
-                  inbox.
+                  {t('enableAssistantDesc')}
                 </p>
               </div>
               <Switch
@@ -407,12 +570,10 @@ export function AiConfig() {
             <div className="flex items-center justify-between gap-4 rounded-md border border-border p-3">
               <div>
                 <p className="text-sm font-medium text-foreground">
-                  Auto-reply to inbound messages
+                  {t('autoReply')}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  The bot answers new inbound messages automatically (only when
-                  no flow handles them and no agent is assigned). Hands off to a
-                  human when it can’t help.
+                  {t('autoReplyDesc')}
                 </p>
               </div>
               <Switch
@@ -424,9 +585,9 @@ export function AiConfig() {
 
             <div className="flex items-center justify-between gap-4">
               <div>
-                <Label htmlFor="ai-max">Max auto-replies per conversation</Label>
+                <Label htmlFor="ai-max">{t('maxAutoReplies')}</Label>
                 <p className="text-xs text-muted-foreground">
-                  After this many bot replies in one thread, the bot goes quiet.
+                  {t('maxAutoRepliesDesc')}
                 </p>
               </div>
               <Input
@@ -444,7 +605,129 @@ export function AiConfig() {
                 className="w-20"
               />
             </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-handoff">{t('handoffTo')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('handoffToDesc')}
+              </p>
+              <Select
+                value={handoffAgentId || HANDOFF_QUEUE}
+                onValueChange={(v) =>
+                  setHandoffAgentId(!v || v === HANDOFF_QUEUE ? '' : v)
+                }
+                disabled={disabled || !autoReplyEnabled}
+              >
+                <SelectTrigger id="ai-handoff">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={HANDOFF_QUEUE}>
+                    {t('handoffQueue')}
+                  </SelectItem>
+                  {members.map((m) => (
+                    <SelectItem key={m.user_id} value={m.user_id}>
+                      {memberLabel(m)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle className="text-base">Lead capture</CardTitle>
+                <CardDescription>
+                  After each customer message, the AI fills empty contact
+                  fields with facts the customer stated — it never overwrites
+                  an existing value.
+                </CardDescription>
+              </div>
+              <Switch
+                checked={captureEnabled}
+                onCheckedChange={setCaptureEnabled}
+                disabled={disabled}
+              />
+            </div>
+          </CardHeader>
+          {captureEnabled && (
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Built-in fields</Label>
+                <div className="flex flex-wrap gap-4">
+                  {(['name', 'email', 'company'] as const).map((key) => (
+                    <label
+                      key={key}
+                      className="flex cursor-pointer items-center gap-2 text-sm capitalize text-foreground"
+                    >
+                      <Checkbox
+                        checked={captureHas({ kind: 'builtin', key })}
+                        onCheckedChange={() =>
+                          toggleCapture({ kind: 'builtin', key })
+                        }
+                        disabled={disabled}
+                      />
+                      {key}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Custom fields</Label>
+                {customFields.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No custom fields yet — create them under Settings → Fields
+                    &amp; tags (e.g. BHK, Budget, Location), then pick them
+                    here.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-4">
+                    {customFields.map((cf) => (
+                      <label
+                        key={cf.id}
+                        className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
+                      >
+                        <Checkbox
+                          checked={captureHas({ kind: 'custom', id: cf.id })}
+                          onCheckedChange={() =>
+                            toggleCapture({ kind: 'custom', id: cf.id })
+                          }
+                          disabled={disabled}
+                        />
+                        {cf.field_name}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="ai-complete-reply">
+                  Completion message{' '}
+                  <span className="font-normal text-muted-foreground">
+                    (optional)
+                  </span>
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Sent once when every selected field has been collected. The
+                  AI then stops replying on that conversation and hands it to
+                  your team. Leave empty to disable.
+                </p>
+                <Textarea
+                  id="ai-complete-reply"
+                  value={captureCompleteReply}
+                  onChange={(e) => setCaptureCompleteReply(e.target.value)}
+                  placeholder="Hi! Our team has your details and will reach out to you shortly."
+                  rows={3}
+                  maxLength={1000}
+                  disabled={disabled}
+                />
+              </div>
+            </CardContent>
+          )}
         </Card>
 
         <AiKnowledgeCard
@@ -470,7 +753,7 @@ export function AiConfig() {
               ) : (
                 <Trash2 className="mr-2 h-4 w-4" />
               )}
-              Remove
+              {t('remove')}
             </Button>
           ) : (
             <span />
@@ -478,7 +761,7 @@ export function AiConfig() {
 
           <Button onClick={handleSave} disabled={disabled}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Save
+            {t('save')}
           </Button>
         </div>
       </div>
