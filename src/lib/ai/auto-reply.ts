@@ -2,12 +2,13 @@ import { supabaseAdmin } from './admin-client'
 import { loadAiConfig } from './config'
 import { buildConversationContext } from './context'
 import { retrieveKnowledge } from './knowledge'
+import { loadAttachmentCatalog, resolveAttachmentKeys } from './attachments'
 import { generateReply } from './generate'
 import { buildSystemPrompt } from './defaults'
 import { buildHandoffSummary } from './handoff'
 import { logAiUsage } from './usage'
 import { latestUserMessage } from './query'
-import { engineSendText } from '@/lib/flows/meta-send'
+import { engineSendText, engineSendMedia } from '@/lib/flows/meta-send'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 interface DispatchArgs {
@@ -106,13 +107,18 @@ export async function dispatchInboundToAiReply(
       latestUserMessage(messages),
     )
 
+    // Files the model may send alongside its reply (best-effort — an
+    // unreadable catalog degrades to a text-only reply).
+    const attachmentCatalog = await loadAttachmentCatalog(db, accountId)
+
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
       mode: 'auto_reply',
       knowledge,
+      attachments: attachmentCatalog,
     })
 
-    const { text, handoff, usage } = await generateReply({
+    const { text, handoff, usage, attachmentKeys } = await generateReply({
       config,
       systemPrompt,
       messages,
@@ -189,6 +195,34 @@ export async function dispatchInboundToAiReply(
       text,
       aiGenerated: true,
     })
+
+    // Send any attachments the model requested, after the text so the
+    // customer reads the reply first. Keys resolve against the same
+    // catalog the prompt offered (unknown keys drop silently). Text +
+    // attachments are one logical reply — the slot claimed above covers
+    // them all — and a failed media send must not undo the text that
+    // already landed, so each send guards itself.
+    const toSend = resolveAttachmentKeys(attachmentKeys, attachmentCatalog)
+    for (const att of toSend) {
+      try {
+        await engineSendMedia({
+          accountId,
+          userId: configOwnerUserId,
+          conversationId,
+          contactId,
+          kind: att.kind,
+          link: att.url,
+          filename:
+            att.kind === 'document' ? (att.filename ?? undefined) : undefined,
+          aiGenerated: true,
+        })
+      } catch (err) {
+        console.error(
+          `[ai auto-reply] attachment send failed (${att.id}):`,
+          err,
+        )
+      }
+    }
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
   }

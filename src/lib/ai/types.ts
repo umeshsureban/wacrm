@@ -82,12 +82,16 @@ export interface ProviderResult {
 
 /** Outcome of a generation call. */
 export interface GenerateResult {
-  /** The reply text, with any handoff sentinel stripped. */
+  /** The reply text, with any handoff sentinel and send markers stripped. */
   text: string
   /** True when the model asked to hand off to a human (auto-reply mode). */
   handoff: boolean
   /** Provider token usage for this call, or null when unavailable. */
   usage: AiUsage | null
+  /** Raw `[[SEND:…]]` attachment keys the model requested. The caller
+   *  validates them against the catalog it offered (see
+   *  `resolveAttachmentKeys`); empty on handoff turns. */
+  attachmentKeys: string[]
 }
 
 /**

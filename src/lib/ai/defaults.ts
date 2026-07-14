@@ -1,4 +1,5 @@
 import type { AiProvider } from './types'
+import { buildAttachmentCatalogSection, type AiAttachment } from './attachments'
 
 // ============================================================
 // Tunables + prompt scaffold for the AI reply assistant.
@@ -64,8 +65,10 @@ export function buildSystemPrompt(args: {
   mode: 'draft' | 'auto_reply'
   /** Knowledge-base excerpts retrieved for the current question. */
   knowledge?: string[]
+  /** Attachment library the model may send from (auto-reply only). */
+  attachments?: AiAttachment[]
 }): string {
-  const { userPrompt, mode, knowledge } = args
+  const { userPrompt, mode, knowledge, attachments } = args
   const parts: string[] = [
     'You are a customer-messaging assistant for a business that uses a WhatsApp CRM. ' +
       'You are shown the recent WhatsApp conversation between the business (assistant) and a customer (user). ' +
@@ -84,6 +87,12 @@ export function buildSystemPrompt(args: {
 
   if (userPrompt && userPrompt.trim()) {
     parts.push(`Business context and instructions:\n${userPrompt.trim()}`)
+  }
+
+  // Only auto-reply can actually deliver files (the draft composer is
+  // text-only), so only that mode is offered the catalog.
+  if (mode === 'auto_reply' && attachments && attachments.length > 0) {
+    parts.push(buildAttachmentCatalogSection(attachments))
   }
 
   if (knowledge && knowledge.length > 0) {

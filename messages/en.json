@@ -1682,6 +1682,29 @@
       "reindex": "Reindex",
       "reindexTooltip": "Re-embed all documents (e.g. after adding an embeddings key)",
       "loading": "Loading…"
+    },
+    "aiAttachments": {
+      "title": "Attachments",
+      "description": "Files the AI can send during conversations — a brochure, price list, or catalog. Give each a name and tell the agent when to send it.",
+      "loadFailed": "Failed to load attachments",
+      "fieldsRequired": "File, name, and description are required.",
+      "fileTooLarge": "File is too large (max {max} MB).",
+      "saveSuccess": "Attachment added.",
+      "saveFailed": "Failed to save attachment.",
+      "removeSuccess": "Attachment removed.",
+      "removeFailed": "Failed to remove.",
+      "noItems": "No attachments yet.",
+      "file": "File (image or PDF)",
+      "name": "Name",
+      "namePlaceholder": "e.g. Price list",
+      "sendWhen": "Send when…",
+      "sendWhenPlaceholder": "e.g. Send when the customer asks about prices or plans",
+      "cancel": "Cancel",
+      "save": "Save attachment",
+      "add": "Add attachment",
+      "delete": "Delete",
+      "fullTooltip": "Library is full — delete one to add another.",
+      "loading": "Loading…"
     }
   }
 }

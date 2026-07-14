@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select';
 import { SettingsPanelHead } from './settings-panel-head';
 import { AiKnowledgeCard } from './ai-knowledge';
+import { AiAttachmentsCard } from './ai-attachments';
 import {
   AI_PROVIDER_DEFAULT_MODEL,
   AI_PROVIDER_MODEL_OPTIONS,
@@ -890,6 +891,8 @@ export function AiConfig() {
               : hasStoredEmbeddingsKey
           }
         />
+
+        <AiAttachmentsCard accountId={accountId} canEdit={canEdit} />
 
         <div className="flex items-center justify-between">
           {configured ? (

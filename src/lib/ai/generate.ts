@@ -6,6 +6,7 @@ import {
   type GenerateResult,
 } from './types'
 import { HANDOFF_SENTINEL, aiRequestTimeoutMs } from './defaults'
+import { parseAttachmentMarkers } from './attachments'
 import { generateOpenAi } from './providers/openai'
 import { generateAnthropic } from './providers/anthropic'
 import { generateGoogle } from './providers/google'
@@ -56,17 +57,21 @@ export async function generateReply(args: GenerateArgs): Promise<GenerateResult>
 }
 
 /**
- * Split the raw model output into `{ text, handoff, usage }`. The
- * sentinel can appear alone or trailing a partial reply; either way we
- * treat the turn as a handoff and strip the marker from any remaining
- * text. `usage` is passed straight through (null when the provider
- * didn't report it).
+ * Split the raw model output into `{ text, handoff, usage,
+ * attachmentKeys }`. The handoff sentinel can appear alone or trailing
+ * a partial reply; either way we treat the turn as a handoff and strip
+ * the marker from any remaining text. `[[SEND:…]]` attachment markers
+ * are stripped in every mode (they must never reach a customer or the
+ * draft composer) — but on a handoff turn the keys are discarded: a
+ * turn the model bailed on must not send files. `usage` is passed
+ * straight through (null when the provider didn't report it).
  */
 export function parseGeneration(
   raw: string,
   usage: AiUsage | null = null,
 ): GenerateResult {
   const handoff = raw.includes(HANDOFF_SENTINEL)
-  const text = raw.split(HANDOFF_SENTINEL).join('').trim()
-  return { text, handoff, usage }
+  const stripped = raw.split(HANDOFF_SENTINEL).join('').trim()
+  const { text, keys } = parseAttachmentMarkers(stripped)
+  return { text, handoff, usage, attachmentKeys: handoff ? [] : keys }
 }

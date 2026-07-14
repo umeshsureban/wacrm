@@ -3,6 +3,10 @@ import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { loadAiConfig } from '@/lib/ai/config'
 import { retrieveKnowledge } from '@/lib/ai/knowledge'
+import {
+  loadAttachmentCatalog,
+  resolveAttachmentKeys,
+} from '@/lib/ai/attachments'
 import { generateReply } from '@/lib/ai/generate'
 import { buildSystemPrompt } from '@/lib/ai/defaults'
 import { latestUserMessage } from '@/lib/ai/query'
@@ -78,14 +82,26 @@ export async function POST(request: Request) {
       config,
       latestUserMessage(messages),
     )
+    // Offer the same attachment catalog the live bot gets, so the
+    // playground previews which files a real customer would receive.
+    const catalog = await loadAttachmentCatalog(supabase, accountId)
     const systemPrompt = buildSystemPrompt({
       userPrompt: config.systemPrompt,
       mode: 'auto_reply',
       knowledge,
+      attachments: catalog,
     })
 
-    const { text, handoff } = await generateReply({ config, systemPrompt, messages })
-    return NextResponse.json({ reply: text, handoff })
+    const { text, handoff, attachmentKeys } = await generateReply({
+      config,
+      systemPrompt,
+      messages,
+    })
+    // Preview only — nothing is sent from here.
+    const attachments = resolveAttachmentKeys(attachmentKeys, catalog).map(
+      (a) => ({ id: a.id, name: a.name, kind: a.kind }),
+    )
+    return NextResponse.json({ reply: text, handoff, attachments })
   } catch (err) {
     if (err instanceof AiError) {
       return NextResponse.json(

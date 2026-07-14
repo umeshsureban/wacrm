@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Bot, RotateCcw, Send, Loader2, UserCircle2, ArrowRight } from 'lucide-react';
+import { Bot, RotateCcw, Send, Loader2, UserCircle2, ArrowRight, Paperclip } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 
@@ -11,6 +11,9 @@ interface Turn {
   content: string;
   /** assistant-only: the agent signalled a human handoff on this turn. */
   handoff?: boolean;
+  /** assistant-only: attachments the live bot WOULD send on this turn
+   *  (the playground never actually sends anything). */
+  attachments?: { id: string; name: string; kind: string }[];
 }
 
 export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
@@ -61,6 +64,9 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
               ? data.reply
               : '',
           handoff: Boolean(data.handoff),
+          attachments: Array.isArray(data.attachments)
+            ? data.attachments
+            : undefined,
         },
       ]);
     } catch {
@@ -144,6 +150,20 @@ export function AiPlayground({ onGoToSetup }: { onGoToSetup?: () => void }) {
               )}
             >
               {t.content && <p className="whitespace-pre-wrap">{t.content}</p>}
+              {t.role === 'assistant' &&
+                (t.attachments?.length ?? 0) > 0 &&
+                t.attachments!.map((a) => (
+                  <p
+                    key={a.id}
+                    className={cn(
+                      'flex items-center gap-1 text-xs text-muted-foreground',
+                      t.content && 'mt-1.5 border-t border-border/50 pt-1.5',
+                    )}
+                  >
+                    <Paperclip className="h-3.5 w-3.5" />
+                    Would send: <span className="font-medium">{a.name}</span>
+                  </p>
+                ))}
               {t.role === 'assistant' && t.handoff && (
                 <p
                   className={cn(

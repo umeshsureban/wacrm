@@ -51,6 +51,7 @@ describe('parseGeneration', () => {
       text: 'Hello there',
       handoff: false,
       usage: null,
+      attachmentKeys: [],
     })
   })
 
@@ -59,11 +60,13 @@ describe('parseGeneration', () => {
       text: '',
       handoff: true,
       usage: null,
+      attachmentKeys: [],
     })
     expect(parseGeneration('Let me get a human [[HANDOFF]]')).toEqual({
       text: 'Let me get a human',
       handoff: true,
       usage: null,
+      attachmentKeys: [],
     })
   })
 
@@ -73,6 +76,25 @@ describe('parseGeneration', () => {
       text: 'Hi',
       handoff: false,
       usage,
+      attachmentKeys: [],
+    })
+  })
+
+  it('extracts + strips attachment send markers', () => {
+    expect(parseGeneration('Here is the brochure.\n[[SEND:A1]]')).toEqual({
+      text: 'Here is the brochure.',
+      handoff: false,
+      usage: null,
+      attachmentKeys: ['A1'],
+    })
+  })
+
+  it('discards attachment keys on a handoff turn but still strips markers', () => {
+    expect(parseGeneration('[[HANDOFF]] [[SEND:A1]]')).toEqual({
+      text: '',
+      handoff: true,
+      usage: null,
+      attachmentKeys: [],
     })
   })
 })
@@ -97,6 +119,7 @@ describe('generateReply — OpenAI', () => {
       text: 'Sure — happy to help!',
       handoff: false,
       usage: { promptTokens: 42, completionTokens: 8, totalTokens: 50 },
+      attachmentKeys: [],
     })
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toContain('api.openai.com')
@@ -150,7 +173,12 @@ describe('generateReply — Google', () => {
       messages: [{ role: 'user', content: 'Oi' }],
     })
 
-    expect(res).toEqual({ text: 'Olá! Como posso ajudar?', handoff: false, usage: null })
+    expect(res).toEqual({
+      text: 'Olá! Como posso ajudar?',
+      handoff: false,
+      usage: null,
+      attachmentKeys: [],
+    })
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toContain('generativelanguage.googleapis.com')
     expect(url).toContain('/openai/chat/completions')
@@ -311,6 +339,7 @@ describe('generateReply — Anthropic', () => {
       text: 'Hi there!',
       handoff: false,
       usage: { promptTokens: 30, completionTokens: 6, totalTokens: 36 },
+      attachmentKeys: [],
     })
     const [url, opts] = fetchMock.mock.calls[0]
     expect(url).toContain('api.anthropic.com')

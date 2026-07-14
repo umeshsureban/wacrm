@@ -6,8 +6,10 @@ const h = vi.hoisted(() => ({
   loadAiConfig: vi.fn(),
   buildConversationContext: vi.fn(),
   retrieveKnowledge: vi.fn(),
+  loadAttachmentCatalog: vi.fn(),
   generateReply: vi.fn(),
   engineSendText: vi.fn(),
+  engineSendMedia: vi.fn(),
   state: {
     conv: null as Record<string, unknown> | null,
     autoResponders: [] as { id: string }[],
@@ -21,7 +23,16 @@ vi.mock('./config', () => ({ loadAiConfig: h.loadAiConfig }))
 vi.mock('./context', () => ({ buildConversationContext: h.buildConversationContext }))
 vi.mock('./knowledge', () => ({ retrieveKnowledge: h.retrieveKnowledge }))
 vi.mock('./generate', () => ({ generateReply: h.generateReply }))
-vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }))
+// Partial mock: the catalog load is stubbed, but key resolution stays
+// real so these tests cover the marker → catalog → send pipeline.
+vi.mock('./attachments', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./attachments')>()
+  return { ...actual, loadAttachmentCatalog: h.loadAttachmentCatalog }
+})
+vi.mock('@/lib/flows/meta-send', () => ({
+  engineSendText: h.engineSendText,
+  engineSendMedia: h.engineSendMedia,
+}))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -101,8 +112,14 @@ beforeEach(() => {
   h.loadAiConfig.mockResolvedValue(aiConfig())
   h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi' }])
   h.retrieveKnowledge.mockResolvedValue([])
-  h.generateReply.mockResolvedValue({ text: 'Hello!', handoff: false })
+  h.loadAttachmentCatalog.mockResolvedValue([])
+  h.generateReply.mockResolvedValue({
+    text: 'Hello!',
+    handoff: false,
+    attachmentKeys: [],
+  })
   h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'm1' })
+  h.engineSendMedia.mockResolvedValue({ whatsapp_message_id: 'm2' })
 })
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
@@ -190,6 +207,108 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     await dispatchInboundToAiReply(ARGS)
     expect(h.generateReply).not.toHaveBeenCalled()
     expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+})
+
+describe('dispatchInboundToAiReply — attachments', () => {
+  const catalog = [
+    {
+      id: 'att-1',
+      name: 'Price list',
+      description: 'Send when asked about prices',
+      kind: 'document' as const,
+      url: 'https://cdn.example.com/prices.pdf',
+      filename: 'prices.pdf',
+    },
+    {
+      id: 'att-2',
+      name: 'Showroom photo',
+      description: 'Send when asked to see the place',
+      kind: 'image' as const,
+      url: 'https://cdn.example.com/showroom.jpg',
+      filename: null,
+    },
+  ]
+
+  it('offers the catalog in the system prompt', async () => {
+    h.loadAttachmentCatalog.mockResolvedValue(catalog)
+    await dispatchInboundToAiReply(ARGS)
+    const systemPrompt = h.generateReply.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).toContain('[A1] Price list — Send when asked about prices')
+    expect(systemPrompt).toContain('[[SEND:')
+  })
+
+  it('sends requested attachments after the text, flagged ai_generated', async () => {
+    h.loadAttachmentCatalog.mockResolvedValue(catalog)
+    h.generateReply.mockResolvedValue({
+      text: 'Here you go!',
+      handoff: false,
+      attachmentKeys: ['A1', 'A2'],
+    })
+    await dispatchInboundToAiReply(ARGS)
+
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+    expect(h.engineSendMedia).toHaveBeenCalledTimes(2)
+    expect(h.engineSendMedia).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        kind: 'document',
+        link: 'https://cdn.example.com/prices.pdf',
+        filename: 'prices.pdf',
+        aiGenerated: true,
+      }),
+    )
+    expect(h.engineSendMedia).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        kind: 'image',
+        link: 'https://cdn.example.com/showroom.jpg',
+        filename: undefined,
+        aiGenerated: true,
+      }),
+    )
+    // Text sends before any media.
+    expect(h.engineSendText.mock.invocationCallOrder[0]).toBeLessThan(
+      h.engineSendMedia.mock.invocationCallOrder[0],
+    )
+    // One logical reply → exactly one claimed slot.
+    expect(h.state.rpcCalls).toHaveLength(1)
+  })
+
+  it('survives a failed media send without throwing', async () => {
+    h.loadAttachmentCatalog.mockResolvedValue(catalog)
+    h.generateReply.mockResolvedValue({
+      text: 'Here you go!',
+      handoff: false,
+      attachmentKeys: ['A1', 'A2'],
+    })
+    h.engineSendMedia.mockRejectedValueOnce(new Error('meta 400'))
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.toBeUndefined()
+    // The second attachment is still attempted after the first fails.
+    expect(h.engineSendMedia).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores hallucinated keys when the catalog is empty', async () => {
+    h.generateReply.mockResolvedValue({
+      text: 'Sending it now!',
+      handoff: false,
+      attachmentKeys: ['A1'],
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+    expect(h.engineSendMedia).not.toHaveBeenCalled()
+  })
+
+  it('ignores keys outside the catalog', async () => {
+    h.loadAttachmentCatalog.mockResolvedValue(catalog)
+    h.generateReply.mockResolvedValue({
+      text: 'Sure!',
+      handoff: false,
+      attachmentKeys: ['A9', 'B1'],
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendMedia).not.toHaveBeenCalled()
   })
 })
 
