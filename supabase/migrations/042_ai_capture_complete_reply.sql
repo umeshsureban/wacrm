@@ -1,5 +1,5 @@
 -- ============================================================
--- 039_ai_capture_complete_reply.sql — qualification-complete reply
+-- 042_ai_capture_complete_reply.sql — qualification-complete reply
 -- + agent category presets
 --
 -- `capture_complete_reply`: message sent ONCE when lead capture fills

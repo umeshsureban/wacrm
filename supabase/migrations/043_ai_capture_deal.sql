@@ -1,5 +1,5 @@
 -- ============================================================
--- 040_ai_capture_deal.sql — create a pipeline deal on lead
+-- 043_ai_capture_deal.sql — create a pipeline deal on lead
 -- qualification
 --
 -- When AI lead capture fills the last target field, a deal is

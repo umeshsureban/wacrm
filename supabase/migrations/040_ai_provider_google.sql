@@ -1,5 +1,5 @@
 -- ============================================================
--- 037_ai_provider_google.sql — allow Google as an AI provider
+-- 040_ai_provider_google.sql — allow Google as an AI provider
 --
 -- Adds 'google' (Gemini API — serves Gemini and Gemma models via an
 -- OpenAI-compatible endpoint) to the ai_configs provider check that

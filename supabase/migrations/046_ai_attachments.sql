@@ -1,5 +1,5 @@
 -- ============================================================
--- 043_ai_attachments.sql — AI attachment library
+-- 046_ai_attachments.sql — AI attachment library
 --
 -- Files (PDFs / images) the AI auto-reply agent may send to a
 -- customer alongside its text reply. Admins upload each file to the

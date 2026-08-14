@@ -1,5 +1,5 @@
 -- ============================================================
--- 041_ai_capture_visit.sql — auto-move the deal when a site
+-- 044_ai_capture_visit.sql — auto-move the deal when a site
 -- visit is booked
 --
 -- `capture_visit_field_id`: the custom field that holds the agreed

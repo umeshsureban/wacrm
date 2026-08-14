@@ -1,5 +1,5 @@
 -- ============================================================
--- 042_ai_usage_log_checks.sql — fix usage logging for Google +
+-- 045_ai_usage_log_checks.sql — fix usage logging for Google +
 -- lead capture
 --
 -- Migration 033 pinned ai_usage_log's provider CHECK to
